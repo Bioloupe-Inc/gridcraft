@@ -28,6 +28,15 @@ pub struct StylesIn {
     pub num_fmts: HashMap<u32, String>,
 }
 
+/// The font, fill and border tables of a styles part, in file order.
+struct Tables {
+    palette: Vec<u32>,
+    fmts: HashMap<u32, String>,
+    fonts: Vec<Font>,
+    fills: Vec<Fill>,
+    borders: Vec<Borders>,
+}
+
 pub fn read_color(e: &El, palette: &[u32]) -> Color {
     if e.flag("auto", false) {
         return Color::Auto;
@@ -304,44 +313,10 @@ fn read_xf(xf: &El, fonts: &[Font], fills: &[Fill], borders: &[Borders], fmts: &
 /// `checkboxes`: for each `xfComplement` index, whether it is a checkbox (see
 /// [`crate::feature_bags::checkbox_complements`]); empty when the file has no feature property bags.
 pub fn read_styles(root: &El, checkboxes: &[bool]) -> StylesIn {
-    let mut palette: Vec<u32> = INDEXED.to_vec();
-    if let Some(ix) = root.path(&["colors", "indexedColors"]) {
-        let custom: Vec<u32> = ix
-            .kids("rgbColor")
-            .map(|c| match read_color(c, &INDEXED) {
-                Color::Rgb(v) => v,
-                _ => 0,
-            })
-            .collect();
-        if !custom.is_empty() {
-            palette = custom;
-        }
-    }
-    let mut fmts = HashMap::new();
-    if let Some(n) = root.child("numFmts") {
-        for f in n.kids("numFmt") {
-            if let (Some(id), Some(code)) = (f.attr_u32("numFmtId"), f.attr("formatCode")) {
-                fmts.insert(id, code.to_string());
-            }
-        }
-    }
-    let fonts: Vec<Font> = root.child("fonts").map(|f| f.kids("font").map(|e| read_font(e, &palette)).collect()).unwrap_or_default();
-    let fills: Vec<Fill> = root.child("fills").map(|f| f.kids("fill").map(|e| read_fill(e, &palette, false)).collect()).unwrap_or_default();
-    let borders: Vec<Borders> = root.child("borders").map(|f| f.kids("border").map(|e| read_border(e, &palette)).collect()).unwrap_or_default();
+    let Tables { palette, fmts, fonts, fills, borders } = read_tables(root);
     let xfs =
         root.child("cellXfs").map(|x| x.kids("xf").map(|xf| read_xf(xf, &fonts, &fills, &borders, &fmts, checkboxes)).collect()).unwrap_or_default();
-    let style_xfs: Vec<Style> =
-        root.child("cellStyleXfs").map(|x| x.kids("xf").map(|xf| read_xf(xf, &fonts, &fills, &borders, &fmts, &[])).collect()).unwrap_or_default();
-    let mut named = Vec::new();
-    if let Some(cs) = root.child("cellStyles") {
-        for c in cs.kids("cellStyle") {
-            if let (Some(name), Some(s)) = (c.attr("name"), c.attr_u32("xfId").and_then(|i| style_xfs.get(i as usize)))
-                && name != "Normal"
-            {
-                named.push((name.to_string(), s.clone()));
-            }
-        }
-    }
+    let named = read_named(root, &fonts, &fills, &borders, &fmts);
     let dxfs = root
         .child("dxfs")
         .map(|d| {
@@ -378,6 +353,53 @@ pub fn read_styles(root: &El, checkboxes: &[bool]) -> StylesIn {
         })
         .unwrap_or_default();
     StylesIn { xfs, dxfs, palette, named, num_fmts: fmts }
+}
+
+fn read_tables(root: &El) -> Tables {
+    let mut palette: Vec<u32> = INDEXED.to_vec();
+    if let Some(ix) = root.path(&["colors", "indexedColors"]) {
+        let custom: Vec<u32> = ix
+            .kids("rgbColor")
+            .map(|c| match read_color(c, &INDEXED) {
+                Color::Rgb(v) => v,
+                _ => 0,
+            })
+            .collect();
+        if !custom.is_empty() {
+            palette = custom;
+        }
+    }
+    let mut fmts = HashMap::new();
+    if let Some(n) = root.child("numFmts") {
+        for f in n.kids("numFmt") {
+            if let (Some(id), Some(code)) = (f.attr_u32("numFmtId"), f.attr("formatCode")) {
+                fmts.insert(id, code.to_string());
+            }
+        }
+    }
+    let fonts: Vec<Font> = root.child("fonts").map(|f| f.kids("font").map(|e| read_font(e, &palette)).collect()).unwrap_or_default();
+    let fills: Vec<Fill> = root.child("fills").map(|f| f.kids("fill").map(|e| read_fill(e, &palette, false)).collect()).unwrap_or_default();
+    let borders: Vec<Borders> = root.child("borders").map(|f| f.kids("border").map(|e| read_border(e, &palette)).collect()).unwrap_or_default();
+    Tables { palette, fmts, fonts, fills, borders }
+}
+
+/// Named cell styles (`cellStyles` with their `cellStyleXfs`), Normal (built-in style 0, whatever
+/// its name in the file's language) left out.
+fn read_named(root: &El, fonts: &[Font], fills: &[Fill], borders: &[Borders], fmts: &HashMap<u32, String>) -> Vec<(String, Style)> {
+    let style_xfs: Vec<Style> =
+        root.child("cellStyleXfs").map(|x| x.kids("xf").map(|xf| read_xf(xf, fonts, fills, borders, fmts, &[])).collect()).unwrap_or_default();
+    let mut named = Vec::new();
+    if let Some(cs) = root.child("cellStyles") {
+        for c in cs.kids("cellStyle") {
+            if let (Some(name), Some(s)) = (c.attr("name"), c.attr_u32("xfId").and_then(|i| style_xfs.get(i as usize)))
+                && name != "Normal"
+                && c.attr_u32("builtinId") != Some(0)
+            {
+                named.push((name.to_string(), s.clone()));
+            }
+        }
+    }
+    named
 }
 
 // ---------------------------------------------------------------- writing
@@ -552,13 +574,32 @@ fn intern<T: Clone + Eq + std::hash::Hash>(list: &mut Vec<T>, map: &mut HashMap<
     i
 }
 
+/// Index of each item's first occurrence in `list`.
+fn first_index<T: Clone + Eq + std::hash::Hash>(list: &[T]) -> HashMap<T, u32> {
+    let mut map = HashMap::new();
+    for (i, item) in list.iter().enumerate() {
+        map.entry(item.clone()).or_insert(i as u32);
+    }
+    map
+}
+
 /// Number format ids assigned while writing.
 struct NumFmts {
     custom: Vec<(u32, String)>,
     map: HashMap<String, u32>,
+    next: u32,
 }
 
 impl NumFmts {
+    /// Starts from the file's custom formats, keeping their ids.
+    fn new(kept: &[(u32, String)]) -> NumFmts {
+        let mut map = HashMap::new();
+        for (id, code) in kept {
+            map.entry(code.clone()).or_insert(*id);
+        }
+        let next = kept.iter().map(|(id, _)| id.saturating_add(1)).max().unwrap_or(0).max(164);
+        NumFmts { custom: kept.to_vec(), map, next }
+    }
     fn id(&mut self, code: &str) -> u32 {
         if let Some(id) = builtin_id(code) {
             return id;
@@ -566,11 +607,133 @@ impl NumFmts {
         if let Some(&id) = self.map.get(code) {
             return id;
         }
-        let id = 164 + self.custom.len() as u32;
+        let id = self.next;
+        self.next = self.next.saturating_add(1);
         self.custom.push((id, code.to_string()));
         self.map.insert(code.to_string(), id);
         id
     }
+}
+
+/// Elements of the styles part written back as read, with the attributes kept for each
+/// (`CT_Font`, `CT_Xf`, `CT_CellStyle`). Anything else, such as extension lists or attributes in
+/// other namespaces, is left out.
+const KEPT_XML: &[(&str, &[&str])] = &[
+    ("font", &[]),
+    ("b", &["val"]),
+    ("i", &["val"]),
+    ("strike", &["val"]),
+    ("condense", &["val"]),
+    ("extend", &["val"]),
+    ("outline", &["val"]),
+    ("shadow", &["val"]),
+    ("u", &["val"]),
+    ("vertAlign", &["val"]),
+    ("sz", &["val"]),
+    ("color", &["auto", "indexed", "rgb", "theme", "tint"]),
+    ("name", &["val"]),
+    ("family", &["val"]),
+    ("charset", &["val"]),
+    ("scheme", &["val"]),
+    (
+        "xf",
+        &[
+            "numFmtId",
+            "fontId",
+            "fillId",
+            "borderId",
+            "xfId",
+            "quotePrefix",
+            "pivotButton",
+            "applyNumberFormat",
+            "applyFont",
+            "applyFill",
+            "applyBorder",
+            "applyAlignment",
+            "applyProtection",
+        ],
+    ),
+    (
+        "alignment",
+        &["horizontal", "vertical", "textRotation", "wrapText", "indent", "relativeIndent", "justifyLastLine", "shrinkToFit", "readingOrder"],
+    ),
+    ("protection", &["locked", "hidden"]),
+    ("cellStyle", &["name", "xfId", "builtinId", "iLevel", "hidden", "customBuiltin"]),
+];
+
+/// `e` written back in the main namespace, keeping what [`KEPT_XML`] lists.
+fn kept_xml(e: &El, out: &mut String) {
+    let Some((_, attrs)) = KEPT_XML.iter().find(|(name, _)| *name == e.name) else { return };
+    let _ = write!(out, "<{}", e.name);
+    for (k, v) in e.attrs.iter().filter(|(k, _)| attrs.contains(&k.as_str())) {
+        let _ = write!(out, " {k}=\"{}\"", esc_attr(v));
+    }
+    let mut inner = String::new();
+    for c in &e.children {
+        kept_xml(c, &mut inner);
+    }
+    if inner.is_empty() {
+        out.push_str("/>");
+    } else {
+        let _ = write!(out, ">{inner}</{}>", e.name);
+    }
+}
+
+/// The `name` children of `e`, written back as read, and how many there are.
+fn kept_list(e: &El, name: &str) -> (usize, String) {
+    let mut out = String::new();
+    let mut n = 0;
+    for c in e.kids(name) {
+        kept_xml(c, &mut out);
+        n += 1;
+    }
+    (n, out)
+}
+
+/// The tables of the styles part a workbook was read from, written back while its default and
+/// named styles are still the ones read: fonts keep what the model doesn't hold (font scheme,
+/// family, charset, an absent colour), and the default cell format and named styles keep their
+/// table ids and built-in style numbers.
+struct Kept {
+    /// Fonts in file order, each with its element.
+    fonts: Vec<(Font, String)>,
+    fills: Vec<Fill>,
+    borders: Vec<Borders>,
+    num_fmts: Vec<(u32, String)>,
+    /// `cellXfs[0]`.
+    default_xf: String,
+    style_xfs: (usize, String),
+    cell_styles: (usize, String),
+}
+
+fn kept_styles(wb: &Workbook) -> Option<Kept> {
+    let root = crate::xml::parse(wb.preserved.as_deref()?.styles.as_deref()?).ok()?;
+    let Tables { fmts, fonts, fills, borders, .. } = read_tables(&root);
+    let default_xf = root.child("cellXfs")?.kids("xf").next()?;
+    if read_xf(default_xf, &fonts, &fills, &borders, &fmts, &[]) != *wb.styles.get(gridcraft_model::StyleId::DEFAULT)
+        || read_named(&root, &fonts, &fills, &borders, &fmts) != wb.cell_styles
+    {
+        return None;
+    }
+    let style_xfs = kept_list(root.child("cellStyleXfs")?, "xf");
+    let cell_styles = kept_list(root.child("cellStyles")?, "cellStyle");
+    if fonts.is_empty() || fills.is_empty() || borders.is_empty() || style_xfs.0 == 0 || cell_styles.0 == 0 {
+        return None;
+    }
+    let fonts = fonts
+        .into_iter()
+        .zip(root.child("fonts")?.kids("font"))
+        .map(|(f, e)| {
+            let mut xml = String::new();
+            kept_xml(e, &mut xml);
+            (f, xml)
+        })
+        .collect();
+    let mut num_fmts: Vec<(u32, String)> = fmts.into_iter().collect();
+    num_fmts.sort_unstable();
+    let mut xf = String::new();
+    kept_xml(default_xf, &mut xf);
+    Some(Kept { fonts, fills, borders, num_fmts, default_xf: xf, style_xfs, cell_styles })
 }
 
 /// `styles.xml` for the workbook: one cell format per model style, in `StyleId` order (so a
@@ -578,19 +741,29 @@ impl NumFmts {
 /// `extra_fmts` are number formats used outside cell styles (PivotTable value fields); the
 /// returned map gives the id of every custom format written.
 pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String]) -> (String, HashMap<String, u32>) {
-    let mut nf = NumFmts { custom: vec![], map: HashMap::new() };
-    let mut fonts: Vec<Font> = vec![];
-    let mut font_map = HashMap::new();
-    let mut fills: Vec<Fill> = vec![Fill::default(), Fill { pattern: PatternType::Gray125, fg: Color::Auto, bg: Color::Auto }];
-    let mut fill_map: HashMap<Fill, u32> = fills.iter().enumerate().map(|(i, f)| (*f, i as u32)).collect();
-    let mut borders: Vec<Borders> = vec![Borders::default()];
-    let mut border_map: HashMap<Borders, u32> = HashMap::from([(Borders::default(), 0)]);
+    let kept = kept_styles(wb);
+    let mut nf = NumFmts::new(kept.as_ref().map_or(&[], |k| &k.num_fmts));
+    let mut fonts: Vec<Font> = kept.as_ref().map(|k| k.fonts.iter().map(|(f, _)| f.clone()).collect()).unwrap_or_default();
+    let mut fills: Vec<Fill> = kept
+        .as_ref()
+        .map(|k| k.fills.clone())
+        .unwrap_or_else(|| vec![Fill::default(), Fill { pattern: PatternType::Gray125, fg: Color::Auto, bg: Color::Auto }]);
+    let mut borders: Vec<Borders> = kept.as_ref().map(|k| k.borders.clone()).unwrap_or_else(|| vec![Borders::default()]);
+    let mut font_map = first_index(&fonts);
+    let mut fill_map = first_index(&fills);
+    let mut border_map = first_index(&borders);
     // The default style's font is font 0.
-    intern(&mut fonts, &mut font_map, &wb.styles.get(gridcraft_model::StyleId::DEFAULT).font);
+    let normal = wb.styles.get(gridcraft_model::StyleId::DEFAULT);
+    intern(&mut fonts, &mut font_map, &normal.font);
 
     let mut xfs = String::new();
     let mut count = 0;
-    for (_, st) in wb.styles.iter() {
+    for (id, st) in wb.styles.iter() {
+        count += 1;
+        if let Some(k) = kept.as_ref().filter(|_| id == gridcraft_model::StyleId::DEFAULT) {
+            xfs.push_str(&k.default_xf);
+            continue;
+        }
         let font = intern(&mut fonts, &mut font_map, &st.font);
         let fill = intern(&mut fills, &mut fill_map, &st.fill);
         let border = intern(&mut borders, &mut border_map, &st.borders);
@@ -629,32 +802,36 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String]) -> (St
             }
             xfs.push_str("</xf>");
         }
-        count += 1;
     }
 
-    // Named cell styles.
-    let mut style_xfs = String::from("<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/>");
-    let mut cell_styles = String::from("<cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/>");
-    let mut named = 1;
-    for (name, st) in &wb.cell_styles {
-        if name.is_empty() || name == "Normal" {
-            continue;
+    // Named cell styles, Normal (the default style) first.
+    let (style_xfs, cell_styles) = match &kept {
+        Some(k) => (k.style_xfs.clone(), k.cell_styles.clone()),
+        None => {
+            let mut style_xfs = String::new();
+            let mut cell_styles = String::new();
+            let named = wb.cell_styles.iter().filter(|(name, _)| !name.is_empty() && name != "Normal");
+            let mut n = 0;
+            for (name, st) in std::iter::once(("Normal", normal)).chain(named.map(|(name, st)| (name.as_str(), st))) {
+                let font = intern(&mut fonts, &mut font_map, &st.font);
+                let fill = intern(&mut fills, &mut fill_map, &st.fill);
+                let border = intern(&mut borders, &mut border_map, &st.borders);
+                let fmt = nf.id(st.num_fmt.as_str());
+                let _ = write!(style_xfs, "<xf numFmtId=\"{fmt}\" fontId=\"{font}\" fillId=\"{fill}\" borderId=\"{border}\"");
+                let al = alignment_xml(&st.align);
+                let pr = protection_xml(&st.protection);
+                if al.is_none() && pr.is_none() {
+                    style_xfs.push_str("/>");
+                } else {
+                    let _ = write!(style_xfs, ">{}{}</xf>", al.unwrap_or_default(), pr.unwrap_or_default());
+                }
+                let builtin = if n == 0 { "builtinId=\"0\"" } else { "customBuiltin=\"1\"" };
+                let _ = write!(cell_styles, "<cellStyle name=\"{}\" xfId=\"{n}\" {builtin}/>", esc_attr(name));
+                n += 1;
+            }
+            ((n, style_xfs), (n, cell_styles))
         }
-        let font = intern(&mut fonts, &mut font_map, &st.font);
-        let fill = intern(&mut fills, &mut fill_map, &st.fill);
-        let border = intern(&mut borders, &mut border_map, &st.borders);
-        let fmt = nf.id(st.num_fmt.as_str());
-        let _ = write!(style_xfs, "<xf numFmtId=\"{fmt}\" fontId=\"{font}\" fillId=\"{fill}\" borderId=\"{border}\"");
-        let al = alignment_xml(&st.align);
-        let pr = protection_xml(&st.protection);
-        if al.is_none() && pr.is_none() {
-            style_xfs.push_str("/>");
-        } else {
-            let _ = write!(style_xfs, ">{}{}</xf>", al.unwrap_or_default(), pr.unwrap_or_default());
-        }
-        let _ = write!(cell_styles, "<cellStyle name=\"{}\" xfId=\"{named}\" customBuiltin=\"1\"/>", esc_attr(name));
-        named += 1;
-    }
+    };
 
     let mut dx = String::new();
     for d in dxfs {
@@ -699,8 +876,11 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String]) -> (St
         s.push_str("</numFmts>");
     }
     let _ = write!(s, "<fonts count=\"{}\">", fonts.len());
-    for f in &fonts {
-        s.push_str(&font_xml(f, false));
+    for (i, f) in fonts.iter().enumerate() {
+        match kept.as_ref().and_then(|k| k.fonts.get(i)) {
+            Some((_, xml)) => s.push_str(xml),
+            None => s.push_str(&font_xml(f, false)),
+        }
     }
     let _ = write!(s, "</fonts><fills count=\"{}\">", fills.len());
     for f in &fills {
@@ -710,9 +890,9 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String]) -> (St
     for b in &borders {
         s.push_str(&border_xml(b));
     }
-    let _ = write!(s, "</borders><cellStyleXfs count=\"{named}\">{style_xfs}</cellStyleXfs>");
+    let _ = write!(s, "</borders><cellStyleXfs count=\"{}\">{}</cellStyleXfs>", style_xfs.0, style_xfs.1);
     let _ = write!(s, "<cellXfs count=\"{count}\">{xfs}</cellXfs>");
-    let _ = write!(s, "<cellStyles count=\"{named}\">{cell_styles}</cellStyles>");
+    let _ = write!(s, "<cellStyles count=\"{}\">{}</cellStyles>", cell_styles.0, cell_styles.1);
     let _ = write!(s, "<dxfs count=\"{}\">{dx}</dxfs>", dxfs.len());
     s.push_str("<tableStyles count=\"0\" defaultTableStyle=\"TableStyleMedium2\" defaultPivotStyle=\"PivotStyleLight16\"/></styleSheet>");
     (s, nf.map)

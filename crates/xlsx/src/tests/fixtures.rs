@@ -1,7 +1,7 @@
 //! Hand-written packages exercising specific reader paths.
 
 use gridcraft_core::{CellError, CellRef, DateSystem, RangeRef, Value};
-use gridcraft_model::{CalcMode, CfRule, Color, HAlign, PatternType, StyleId, Underline, Visibility};
+use gridcraft_model::{CalcMode, CfRule, Color, HAlign, PatternType, StyleId, Underline, VAlign, Visibility};
 
 use super::minimal;
 use crate::read_xlsx;
@@ -494,4 +494,43 @@ fn text_box_formatting_is_read_and_written() {
     assert_eq!(rgb(g.text_color), rgb(f.text_color));
     assert_eq!(rgb(g.text_outline.map(|o| o.0)), rgb(f.text_outline.map(|o| o.0)));
     assert_eq!(g.text_outline.map(|o| o.1), Some(1.5));
+}
+
+/// A workbook whose Normal style isn't Calibri 11 keeps it through open → edit → save: its default
+/// font (with the font scheme the model doesn't hold), the default cell format's alignment, and
+/// the named styles as read.
+#[test]
+fn default_style_survives_edit_and_save() {
+    let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <fonts count="2"><font><sz val="10"/><name val="Arial"/><family val="2"/><scheme val="minor"/></font>
+        <font><b/><sz val="10"/><name val="Arial"/><family val="2"/><scheme val="minor"/></font></fonts>
+      <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+      <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+      <cellStyleXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment vertical="center"/></xf>
+        <xf numFmtId="0" fontId="1" fillId="0" borderId="0"><alignment vertical="center"/></xf></cellStyleXfs>
+      <cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"><alignment vertical="center"/></xf>
+        <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="1" applyFont="1"><alignment vertical="center"/></xf></cellXfs>
+      <cellStyles count="2"><cellStyle name="Normal" xfId="0" builtinId="0"/><cellStyle name="Heading 1" xfId="1" builtinId="16"/></cellStyles>
+    </styleSheet>"#;
+    let rels = r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#;
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row></sheetData>"#;
+    let (mut wb, _) = read_xlsx(&minimal(body, &[("xl/styles.xml", styles)], rels, "")).unwrap();
+    wb.sheet_mut(0).unwrap().set_value(at("C1"), Value::Number(3.0));
+    let saved = crate::write_xlsx(&wb).unwrap();
+
+    let (back, _) = read_xlsx(&saved).unwrap();
+    for cell in ["A1", "C1"] {
+        let st = back.styles.get(back.sheet(0).unwrap().style_id(at(cell)));
+        assert_eq!((st.font.name.as_str(), st.font.size, st.align.v), ("Arial", 10.0, VAlign::Center), "{cell}");
+    }
+    let b1 = back.styles.get(back.sheet(0).unwrap().style_id(at("B1")));
+    assert!(b1.font.bold && b1.font.name == "Arial" && b1.align.v == VAlign::Center);
+
+    let original = crate::xml::parse(styles.as_bytes()).unwrap();
+    let written = crate::package::Package::open(&saved).unwrap().read_xml("xl/styles.xml").unwrap().unwrap();
+    assert_eq!(written.path(&["fonts", "font"]), original.path(&["fonts", "font"]), "default font as read");
+    assert_eq!(written.path(&["cellXfs", "xf"]), original.path(&["cellXfs", "xf"]), "default cell format as read");
+    for list in ["cellStyleXfs", "cellStyles"] {
+        assert_eq!(written.child(list).map(|e| &e.children), original.child(list).map(|e| &e.children), "{list} as read");
+    }
 }

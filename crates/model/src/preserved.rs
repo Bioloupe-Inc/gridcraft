@@ -57,14 +57,23 @@ pub struct Preserved {
     /// The sheet's legacy VML drawing when kept elements need its shapes (form controls, OLE
     /// objects). Its own relationships point into `parts`.
     pub vml: Option<PreservedPart>,
+    /// The styles part as read (workbook owner only): saving writes its fonts, default cell format
+    /// and named styles back as they were while the model's default and named styles are unchanged.
+    pub styles: Option<Arc<[u8]>>,
 }
 
 impl Preserved {
     pub fn is_empty(&self) -> bool {
-        self.package_rels.is_empty() && self.rels.is_empty() && self.parts.is_empty() && self.elements.is_empty() && self.vml.is_none()
+        self.package_rels.is_empty()
+            && self.rels.is_empty()
+            && self.parts.is_empty()
+            && self.elements.is_empty()
+            && self.vml.is_none()
+            && self.styles.is_none()
     }
     /// Total bytes held.
     pub fn byte_len(&self) -> usize {
-        self.parts.iter().chain(self.vml.iter()).fold(0usize, |n, p| n.saturating_add(p.data.len()))
+        let parts = self.parts.iter().chain(self.vml.iter()).fold(0usize, |n, p| n.saturating_add(p.data.len()));
+        parts.saturating_add(self.styles.as_ref().map_or(0, |s| s.len()))
     }
 }
