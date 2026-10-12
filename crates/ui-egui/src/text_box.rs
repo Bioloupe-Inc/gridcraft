@@ -4,7 +4,7 @@ use egui::{Color32, FontId, Key, Modifiers, Rect, TextEdit};
 use gridcraft_engine::{Mode, model::ShapeKind};
 use serde_json::json;
 
-use crate::{SheetApp, grid::Geo, theme};
+use crate::{SheetApp, grid::Geo};
 
 #[derive(Clone, Debug)]
 pub struct EditState {
@@ -150,7 +150,7 @@ pub(crate) fn show(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, sh: &gridcr
         let response = ui.add(
             TextEdit::multiline(&mut ed.text)
                 .id(id)
-                .font(FontId::new(14.0 * geo.z, egui::FontFamily::Name(theme::CELL.into())))
+                .font(FontId::new(14.0 * geo.z, egui::FontFamily::Name(gridcraft_fonts::CELL.into())))
                 .text_color(Color32::BLACK)
                 .frame(egui::Frame::NONE)
                 .margin(egui::Margin::ZERO)

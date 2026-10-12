@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, Visuals};
+use gridcraft_fonts::{CELL, CELL_BOLD, CELL_BOLD_ITALIC, CELL_ITALIC, HanOrder, MONO, SERIF, UI, UI_BOLD, candidates, font_parses};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tokens {
@@ -142,15 +143,6 @@ impl Tokens {
     }
 }
 
-pub const UI: &str = "ui";
-pub const UI_BOLD: &str = "ui-bold";
-pub const CELL: &str = "cell";
-pub const CELL_BOLD: &str = "cell-bold";
-pub const CELL_ITALIC: &str = "cell-italic";
-pub const CELL_BOLD_ITALIC: &str = "cell-bold-italic";
-pub const SERIF: &str = "serif";
-pub const MONO: &str = "mono";
-
 pub fn ui_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(UI.into()))
 }
@@ -169,39 +161,7 @@ pub fn cell_family(name: &str, bold: bool, italic: bool) -> FontFamily {
     if crate::fonts::is_bound(&role) {
         return FontFamily::Name(role.into());
     }
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("courier") || lower.contains("mono") || lower.contains("consolas") {
-        return FontFamily::Name(MONO.into());
-    }
-    if lower.contains("times")
-        || lower.contains("georgia")
-        || lower.contains("cambria")
-        || lower.contains("serif") && !lower.contains("sans")
-        || lower.contains("garamond")
-    {
-        return FontFamily::Name(SERIF.into());
-    }
-    FontFamily::Name(
-        match (bold, italic) {
-            (true, true) => CELL_BOLD_ITALIC,
-            (true, false) => CELL_BOLD,
-            (false, true) => CELL_ITALIC,
-            (false, false) => CELL,
-        }
-        .into(),
-    )
-}
-
-/// Whether epaint can open face `index` of this font file and it maps characters to glyphs.
-/// epaint panics (in `Context::set_fonts`, i.e. on startup) on a face it can't open, so every font
-/// file we did not ship is checked first with the same parser and the same call epaint makes
-/// (`skrifa::FontRef::from_index`): a corrupt file, something that is not an sfnt at all, or a
-/// collection index past the end is rejected instead of crashing the app (#226). A face whose
-/// character map is unreadable (a truncated file) would open but draw nothing, so it is refused
-/// too and the next candidate gets its turn.
-pub(crate) fn font_parses(bytes: &[u8], index: u32) -> bool {
-    use skrifa::MetadataProvider;
-    skrifa::FontRef::from_index(bytes, index).is_ok_and(|font| font.charmap().has_map())
+    FontFamily::Name(gridcraft_fonts::cell_role(name, bold, italic).into())
 }
 
 /// Loads the first candidate that exists and parses. A file that exists but can't be parsed is
@@ -242,139 +202,16 @@ fn try_load(_paths: &[(&str, u32)]) -> Option<FontData> {
     None
 }
 
-fn home_fonts(file: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/Library/Fonts/{file}")
-}
-
-/// Candidate font files per role, in preference order.
-fn candidates(role: &str) -> Vec<(String, u32)> {
-    let mac_sys = "/System/Library/Fonts";
-    let mac_sup = "/System/Library/Fonts/Supplemental";
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let lin = ["/usr/share/fonts/truetype", "/usr/share/fonts", "/usr/local/share/fonts", "/usr/share/fonts/TTF"];
-    let mut v: Vec<(String, u32)> = Vec::new();
-    let mut add = |s: String, i: u32| v.push((s, i));
-    match role {
-        "ui" => {
-            add(format!("{mac_sys}/SFNS.ttf"), 0);
-            add(format!("{mac_sys}/HelveticaNeue.ttc"), 0);
-            add(format!("{win}\\segoeui.ttf"), 0);
-            for d in lin {
-                add(format!("{d}/cantarell/Cantarell-Regular.otf"), 0);
-                add(format!("{d}/noto/NotoSans-Regular.ttf"), 0);
-                add(format!("{d}/dejavu/DejaVuSans.ttf"), 0);
-                add(format!("{d}/liberation/LiberationSans-Regular.ttf"), 0);
-            }
-            // Fedora keeps each family in its own package folder (#54).
-            add("/usr/share/fonts/abattis-cantarell-fonts/Cantarell-Regular.otf".into(), 0);
-            add("/usr/share/fonts/google-noto/NotoSans-Regular.ttf".into(), 0);
-            add("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf".into(), 0);
-            add("/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf".into(), 0);
-        }
-        "ui-bold" => {
-            add(format!("{mac_sys}/HelveticaNeue.ttc"), 1);
-            add(format!("{win}\\segoeuib.ttf"), 0);
-            for d in lin {
-                add(format!("{d}/noto/NotoSans-Bold.ttf"), 0);
-                add(format!("{d}/dejavu/DejaVuSans-Bold.ttf"), 0);
-                add(format!("{d}/liberation/LiberationSans-Bold.ttf"), 0);
-            }
-            add("/usr/share/fonts/google-noto/NotoSans-Bold.ttf".into(), 0);
-            add("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf".into(), 0);
-            add("/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf".into(), 0);
-        }
-        "cell" | "cell-bold" | "cell-italic" | "cell-bold-italic" => {
-            let (carlito, calibri_win, calibri_mac, arial_mac, arial_win, lib, dejavu) = match role {
-                "cell" => {
-                    ("Carlito-Regular.ttf", "calibri.ttf", "Calibri.ttf", "Arial.ttf", "arial.ttf", "LiberationSans-Regular.ttf", "DejaVuSans.ttf")
-                }
-                "cell-bold" => (
-                    "Carlito-Bold.ttf",
-                    "calibrib.ttf",
-                    "Calibri Bold.ttf",
-                    "Arial Bold.ttf",
-                    "arialbd.ttf",
-                    "LiberationSans-Bold.ttf",
-                    "DejaVuSans-Bold.ttf",
-                ),
-                "cell-italic" => (
-                    "Carlito-Italic.ttf",
-                    "calibrii.ttf",
-                    "Calibri Italic.ttf",
-                    "Arial Italic.ttf",
-                    "ariali.ttf",
-                    "LiberationSans-Italic.ttf",
-                    "DejaVuSans-Oblique.ttf",
-                ),
-                _ => (
-                    "Carlito-BoldItalic.ttf",
-                    "calibriz.ttf",
-                    "Calibri Bold Italic.ttf",
-                    "Arial Bold Italic.ttf",
-                    "arialbi.ttf",
-                    "LiberationSans-BoldItalic.ttf",
-                    "DejaVuSans-BoldOblique.ttf",
-                ),
-            };
-            // Calibri if the user has it installed system-wide (never from an Office bundle).
-            add(format!("/Library/Fonts/{calibri_mac}"), 0);
-            add(home_fonts(calibri_mac), 0);
-            add(format!("{win}\\{calibri_win}"), 0);
-            for d in lin {
-                add(format!("{d}/crosextra/{carlito}"), 0);
-                add(format!("{d}/carlito/{carlito}"), 0);
-            }
-            add(home_fonts(carlito), 0);
-            add(format!("{mac_sup}/{arial_mac}"), 0);
-            add(format!("{win}\\{arial_win}"), 0);
-            for d in lin {
-                add(format!("{d}/liberation/{lib}"), 0);
-                add(format!("{d}/dejavu/{dejavu}"), 0);
-            }
-        }
-        "serif" => {
-            add(format!("{mac_sup}/Times New Roman.ttf"), 0);
-            add(format!("{win}\\times.ttf"), 0);
-            for d in lin {
-                add(format!("{d}/liberation/LiberationSerif-Regular.ttf"), 0);
-                add(format!("{d}/dejavu/DejaVuSerif.ttf"), 0);
-            }
-        }
-        "mono" => {
-            add(format!("{mac_sys}/SFNSMono.ttf"), 0);
-            add(format!("{mac_sys}/Menlo.ttc"), 0);
-            add(format!("{win}\\consola.ttf"), 0);
-            for d in lin {
-                add(format!("{d}/dejavu/DejaVuSansMono.ttf"), 0);
-            }
-        }
-        _ => {}
-    }
-    v
-}
-
 /// Builds the font set from system fonts (with egui's defaults as fallback), with the default
 /// (non-Japanese) Han order. Never reads the host locale, so tests and snapshots are stable.
 pub fn font_definitions() -> FontDefinitions {
     font_definitions_for_language(crate::i18n::Language::En)
 }
 
-/// Which Han face leads the fallback chain. Both Han faces cover kana and most kanji, so this only
-/// decides glyph shapes (and which face catches a glyph the other lacks); switching between two
-/// languages with the same order needs no font rebuild.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HanOrder {
-    /// Japanese glyph shapes first (the interface is Japanese).
-    Japanese,
-    /// Simplified Chinese first: the widest Han coverage, for every other interface language.
-    Chinese,
-}
-
-impl HanOrder {
-    pub fn of(language: crate::i18n::Language) -> Self {
-        if language == crate::i18n::Language::Ja { Self::Japanese } else { Self::Chinese }
-    }
+/// Which Han face leads the fallback chain: Japanese glyph shapes for a Japanese interface,
+/// Simplified Chinese (the widest Han coverage) for every other language.
+pub fn han_order(language: crate::i18n::Language) -> HanOrder {
+    if language == crate::i18n::Language::Ja { HanOrder::Japanese } else { HanOrder::Chinese }
 }
 
 /// Builds the font set with the Han fallback faces ordered for the interface language.
@@ -392,7 +229,7 @@ pub fn font_definitions_with(language: crate::i18n::Language, used: &[String]) -
     let mut bound: Vec<String> = Vec::new();
     // The non-Latin fallback faces have to sit at the end of each chain: a Latin font owns Latin,
     // and epaint picks the first face that has the glyph, so they only catch their own scripts.
-    let fallback = load_fallback(&mut fonts, HanOrder::of(language));
+    let fallback = load_fallback(&mut fonts, han_order(language));
     for role in [UI, UI_BOLD, CELL, CELL_BOLD, CELL_ITALIC, CELL_BOLD_ITALIC, SERIF, MONO] {
         let paths = candidates(role);
         let refs: Vec<(&str, u32)> = paths.iter().map(|(p, i)| (p.as_str(), *i)).collect();
@@ -413,7 +250,7 @@ pub fn font_definitions_with(language: crate::i18n::Language, used: &[String]) -
         bound.push(role.to_string());
     }
     // Installed workbook fonts, so a cell's chosen font actually renders in it.
-    for family in crate::fonts::installed_among(used) {
+    for family in gridcraft_fonts::installed_among(used) {
         bound.extend(crate::fonts::bind_family(&mut fonts, &family));
     }
     // Interface text (formula bar, name box, dialogs) falls back to the cell font before the
@@ -453,7 +290,7 @@ fn load_fallback(fonts: &mut FontDefinitions, han: HanOrder) -> Vec<String> {
     // Noto Sans CJK .ttc found for Han also carries Hangul (and Tahoma carries both Thai and
     // Hebrew), so loading it again for a later script would only duplicate tens of MB in memory.
     let mut loaded: Vec<String> = Vec::new();
-    for (key, cands) in fallback_faces(han) {
+    for (key, cands) in gridcraft_fonts::fallback_faces(han) {
         for (path, index) in &cands {
             if loaded.contains(path) {
                 break; // a face loaded for an earlier script already covers this one
@@ -472,207 +309,6 @@ fn load_fallback(fonts: &mut FontDefinitions, han: HanOrder) -> Vec<String> {
 #[cfg(target_arch = "wasm32")]
 fn load_fallback(_fonts: &mut FontDefinitions, _han: HanOrder) -> Vec<String> {
     Vec::new()
-}
-
-/// Every fallback face we look for, in chain order: `(key, candidate files)`. One file per script
-/// family is enough — epaint picks the first face with the glyph, and a script's glyphs live in one
-/// file. Order only matters between faces that both cover a glyph (Japanese vs Chinese kanji), so
-/// the interface language reorders the two Han entries and nothing else.
-#[cfg(not(target_arch = "wasm32"))]
-fn fallback_faces(han: HanOrder) -> Vec<(&'static str, Vec<(String, u32)>)> {
-    let ja = ("sys-cjk-han-ja", cjk_han_japanese());
-    let zh = ("sys-cjk-han-zh", cjk_han_simplified());
-    let (first, second) = match han {
-        HanOrder::Japanese => (ja, zh),
-        HanOrder::Chinese => (zh, ja),
-    };
-    vec![
-        first,
-        second,
-        ("sys-cjk-hangul", cjk_hangul()),
-        ("sys-thai", thai()),
-        ("sys-hebrew", hebrew()),
-        ("sys-symbols", symbols()),
-        ("sys-symbols-2", symbols_more()),
-    ]
-}
-
-/// Linux directories that hold CJK fonts across distributions: Debian/Ubuntu (`opentype/noto`,
-/// `truetype/wqy`), Fedora (`google-noto-cjk`), Arch (`noto-cjk`, `wenquanyi`), plus local and
-/// flat layouts.
-#[cfg(not(target_arch = "wasm32"))]
-const LINUX_CJK_DIRS: [&str; 10] = [
-    "/usr/share/fonts/opentype/noto",
-    "/usr/share/fonts/google-noto-cjk",
-    "/usr/share/fonts/noto-cjk",
-    "/usr/share/fonts/truetype/noto",
-    "/usr/share/fonts/noto",
-    "/usr/share/fonts/truetype",
-    "/usr/share/fonts/TTF",
-    "/usr/share/fonts",
-    "/usr/local/share/fonts",
-    "/usr/local/share/fonts/noto-cjk",
-];
-
-/// Japanese Han + Kana faces (Japanese kanji glyph shapes).
-///
-/// The region-merged `NotoSansCJK-Regular.ttc` holds one face per locale (JP 0, KR 1, SC 2, TC 3,
-/// HK 4) with the same glyph coverage, so the index only picks glyph shapes. Whichever Han list
-/// comes first loads it; [`load_fallback`] does not load the same file again for the other.
-#[cfg(not(target_arch = "wasm32"))]
-fn cjk_han_japanese() -> Vec<(String, u32)> {
-    let mac = "/System/Library/Fonts";
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let mut v: Vec<(String, u32)> = Vec::new();
-    v.push((format!("{win}\\YuGothR.ttc"), 0)); // Yu Gothic
-    v.push((format!("{win}\\msgothic.ttc"), 0)); // MS Gothic
-    v.push((format!("{mac}/ヒラギノ角ゴシック W3.ttc"), 0)); // Hiragino Sans
-    for d in LINUX_CJK_DIRS {
-        v.push((format!("{d}/NotoSansCJKjp-Regular.otf"), 0));
-        v.push((format!("{d}/NotoSansCJK-Regular.ttc"), 0)); // JP face
-    }
-    v
-}
-
-/// Simplified Chinese Han faces. Loaded apart from the Japanese ones so a glyph one family lacks
-/// (simplified-only hanzi in a Japanese font) still falls through to a real glyph.
-#[cfg(not(target_arch = "wasm32"))]
-fn cjk_han_simplified() -> Vec<(String, u32)> {
-    let mac = "/System/Library/Fonts";
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let mut v: Vec<(String, u32)> = Vec::new();
-    v.push((format!("{win}\\msyh.ttc"), 0)); // Microsoft YaHei
-    v.push((format!("{win}\\simsun.ttc"), 0)); // SimSun
-    v.push((format!("{win}\\simhei.ttf"), 0)); // SimHei
-    v.push((format!("{mac}/Hiragino Sans GB.ttc"), 0)); // ships on every recent macOS
-    v.push((format!("{mac}/PingFang.ttc"), 0)); // older macOS only; now a downloadable asset
-    for d in LINUX_CJK_DIRS {
-        v.push((format!("{d}/NotoSansCJKsc-Regular.otf"), 0));
-        v.push((format!("{d}/NotoSansCJK-Regular.ttc"), 2)); // SC face
-    }
-    for d in LINUX_CJK_DIRS {
-        v.push((format!("{d}/wqy/wqy-microhei.ttc"), 0));
-        v.push((format!("{d}/wenquanyi/wqy-microhei.ttc"), 0));
-        v.push((format!("{d}/wqy-microhei.ttc"), 0));
-    }
-    v
-}
-
-/// Hangul faces (Korean). The Han faces above that come from the region-merged Noto Sans CJK file
-/// already carry Hangul; [`load_fallback`] then skips this list rather than load the file twice.
-#[cfg(not(target_arch = "wasm32"))]
-fn cjk_hangul() -> Vec<(String, u32)> {
-    let mac = "/System/Library/Fonts";
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let mut v: Vec<(String, u32)> = Vec::new();
-    v.push((format!("{win}\\malgun.ttf"), 0)); // Malgun Gothic
-    v.push((format!("{mac}/AppleSDGothicNeo.ttc"), 0));
-    for d in LINUX_CJK_DIRS {
-        v.push((format!("{d}/NotoSansCJKkr-Regular.otf"), 0));
-        v.push((format!("{d}/NotoSansCJK-Regular.ttc"), 1)); // KR face
-    }
-    v
-}
-
-/// Thai faces. Windows ships Leelawadee UI and Tahoma/Microsoft Sans Serif (both carry Thai);
-/// macOS has Thonburi; Linux usually has Noto Sans Thai or Garuda.
-#[cfg(not(target_arch = "wasm32"))]
-fn thai() -> Vec<(String, u32)> {
-    let mac_sys = "/System/Library/Fonts";
-    let mac_sup = "/System/Library/Fonts/Supplemental";
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let lin = ["/usr/share/fonts/truetype/noto", "/usr/share/fonts/opentype/noto", "/usr/share/fonts/truetype", "/usr/share/fonts"];
-    let mut v: Vec<(String, u32)> = Vec::new();
-    v.push((format!("{win}\\LeelawUI.ttf"), 0)); // Leelawadee UI
-    v.push((format!("{win}\\tahoma.ttf"), 0)); // Tahoma
-    v.push((format!("{win}\\micross.ttf"), 0)); // Microsoft Sans Serif
-    v.push((format!("{mac_sup}/Thonburi.ttc"), 0));
-    v.push((format!("{mac_sys}/SukhumvitSet.ttc"), 0));
-    for d in lin {
-        v.push((format!("{d}/NotoSansThai-Regular.ttf"), 0));
-        v.push((format!("{d}/tlwg/Garuda.ttf"), 0));
-        v.push((format!("{d}/garuda/Garuda.ttf"), 0));
-    }
-    v
-}
-
-/// Hebrew faces. Windows has David and FrankRuehl (and Tahoma/Courier New carry Hebrew); macOS has
-/// Arial Hebrew and David; Linux usually has Noto Sans Hebrew or DejaVu Sans.
-#[cfg(not(target_arch = "wasm32"))]
-fn hebrew() -> Vec<(String, u32)> {
-    let mac_sys = "/System/Library/Fonts";
-    let mac_sup = "/System/Library/Fonts/Supplemental";
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let lin = ["/usr/share/fonts/truetype/noto", "/usr/share/fonts/opentype/noto", "/usr/share/fonts/truetype", "/usr/share/fonts"];
-    let mut v: Vec<(String, u32)> = Vec::new();
-    v.push((format!("{win}\\david.ttf"), 0)); // David
-    v.push((format!("{win}\\frank.ttf"), 0)); // FrankRuehl
-    v.push((format!("{win}\\tahoma.ttf"), 0)); // Tahoma
-    v.push((format!("{mac_sys}/ArialHB.ttc"), 0)); // Arial Hebrew
-    v.push((format!("{mac_sys}/SFHebrew.ttf"), 0));
-    v.push((format!("{mac_sup}/Arial Hebrew.ttf"), 0));
-    v.push((format!("{mac_sup}/David.ttf"), 0));
-    v.push((format!("{mac_sys}/LucidaGrande.ttc"), 0));
-    v.push((format!("{mac_sys}/Lucida Grande.ttc"), 0));
-    for d in lin {
-        v.push((format!("{d}/NotoSansHebrew-Regular.ttf"), 0));
-        v.push((format!("{d}/dejavu/DejaVuSans.ttf"), 0));
-        v.push((format!("{d}/freefont/FreeSans.ttf"), 0));
-    }
-    v
-}
-
-/// Symbol faces behind the UI font. Interface fonts such as Noto Sans and Cantarell (and egui's
-/// built-in Ubuntu) lack arrows, check marks, geometric shapes and keyboard symbols (▾ ✓ ✕ ▲ ↳ ⇧),
-/// which then render as empty boxes (#197, #54). DejaVu Sans covers most of them; the paths cover
-/// Debian/Ubuntu, Fedora and Arch layouts. [`load_fallback`] skips the file if Hebrew already
-/// loaded it.
-#[cfg(not(target_arch = "wasm32"))]
-fn symbols() -> Vec<(String, u32)> {
-    let win = std::env::var("WINDIR").map(|w| format!("{w}\\Fonts")).unwrap_or_else(|_| "C:\\Windows\\Fonts".into());
-    let mut v: Vec<(String, u32)> = vec![(format!("{win}\\seguisym.ttf"), 0), ("/System/Library/Fonts/Apple Symbols.ttf".into(), 0)];
-    for d in [
-        "/usr/share/fonts/truetype/dejavu",
-        "/usr/share/fonts/dejavu-sans-fonts",
-        "/usr/share/fonts/TTF",
-        "/usr/share/fonts/dejavu",
-        "/usr/share/fonts/truetype/ttf-dejavu",
-        "/usr/local/share/fonts/dejavu",
-        "/usr/local/share/fonts",
-    ] {
-        v.push((format!("{d}/DejaVuSans.ttf"), 0));
-    }
-    v
-}
-
-/// A second symbol face for what the first lacks (⌘ and other technical symbols): Noto Sans
-/// Symbols 2 where it is installed, or Segoe UI Symbol behind Segoe UI.
-#[cfg(not(target_arch = "wasm32"))]
-fn symbols_more() -> Vec<(String, u32)> {
-    let mut v: Vec<(String, u32)> = Vec::new();
-    for d in [
-        "/usr/share/fonts/noto",
-        "/usr/share/fonts/truetype/noto",
-        "/usr/share/fonts/opentype/noto",
-        "/usr/share/fonts/google-noto-sans-symbols-2-fonts",
-        "/usr/share/fonts/google-noto",
-        "/usr/local/share/fonts/noto",
-    ] {
-        v.push((format!("{d}/NotoSansSymbols2-Regular.ttf"), 0));
-    }
-    v
-}
-
-/// Whether any symbol fallback face is installed (tests skip their glyph checks without one).
-pub fn symbol_face_installed() -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        symbols().iter().chain(symbols_more().iter()).any(|(p, _)| std::path::Path::new(p).exists())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        false
-    }
 }
 
 pub fn apply(ctx: &egui::Context, dark: bool) {
@@ -769,6 +405,7 @@ mod font_binding_tests {
 mod tests {
     use super::*;
     use crate::i18n::Language;
+    use gridcraft_fonts::fallback_faces;
 
     #[test]
     fn fallback_faces_are_appended_to_every_family() {
@@ -811,19 +448,10 @@ mod tests {
     }
 
     #[test]
-    fn language_reorders_only_the_han_faces() {
-        let keys = |han| fallback_faces(han).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
-        assert_eq!(
-            keys(HanOrder::Japanese),
-            ["sys-cjk-han-ja", "sys-cjk-han-zh", "sys-cjk-hangul", "sys-thai", "sys-hebrew", "sys-symbols", "sys-symbols-2"]
-        );
-        assert_eq!(
-            keys(HanOrder::Chinese),
-            ["sys-cjk-han-zh", "sys-cjk-han-ja", "sys-cjk-hangul", "sys-thai", "sys-hebrew", "sys-symbols", "sys-symbols-2"]
-        );
-        assert_eq!(HanOrder::of(Language::Ja), HanOrder::Japanese);
+    fn only_a_japanese_interface_puts_japanese_han_first() {
+        assert_eq!(han_order(Language::Ja), HanOrder::Japanese);
         for l in [Language::En, Language::Zh, Language::Ko, Language::Ru, Language::PtBr, Language::De, Language::Cs] {
-            assert_eq!(HanOrder::of(l), HanOrder::Chinese, "{l:?} shares the default order (no font rebuild)");
+            assert_eq!(han_order(l), HanOrder::Chinese, "{l:?} shares the default order (no font rebuild)");
         }
     }
 
@@ -833,8 +461,7 @@ mod tests {
         // once, not once per script (tens of MB each).
         for language in [Language::En, Language::Ja] {
             let fonts = font_definitions_for_language(language);
-            let present: Vec<&Arc<FontData>> =
-                fallback_faces(HanOrder::of(language)).into_iter().filter_map(|(k, _)| fonts.font_data.get(k)).collect();
+            let present: Vec<&Arc<FontData>> = fallback_faces(han_order(language)).into_iter().filter_map(|(k, _)| fonts.font_data.get(k)).collect();
             for (i, a) in present.iter().enumerate() {
                 for b in present.iter().skip(i + 1) {
                     assert!(a.font != b.font, "the same font file is loaded for two fallback scripts");
@@ -849,11 +476,11 @@ mod tests {
         // resolve a sample string to a real glyph, not the tofu replacement char. Skips a script
         // whose face is absent (a minimal machine) and fails if a face is present but not wired in.
         let cases: [(&str, Vec<(String, u32)>, &str); 7] = [
-            ("sys-cjk-han-ja", cjk_han_japanese(), "カテゴリ"),
-            ("sys-cjk-han-zh", cjk_han_simplified(), "页面布局 客户端配置"),
-            ("sys-cjk-hangul", cjk_hangul(), "한글"),
-            ("sys-thai", thai(), "ทดสอบ"),
-            ("sys-hebrew", hebrew(), "עברית"),
+            ("sys-cjk-han-ja", gridcraft_fonts::cjk_han_japanese(), "カテゴリ"),
+            ("sys-cjk-han-zh", gridcraft_fonts::cjk_han_simplified(), "页面布局 客户端配置"),
+            ("sys-cjk-hangul", gridcraft_fonts::cjk_hangul(), "한글"),
+            ("sys-thai", gridcraft_fonts::thai(), "ทดสอบ"),
+            ("sys-hebrew", gridcraft_fonts::hebrew(), "עברית"),
             ("ui", candidates(UI), "Русский"),
             // Czech interface labels: every Czech accented letter, in both cases.
             ("ui", candidates(UI), "Příliš žluťoučký kůň úpěl ďábelské ódy ŘŠČŽÝÁÍÉÚŮĚŤĎŇÓ"),

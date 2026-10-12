@@ -9,14 +9,14 @@ const UI_SYMBOLS: &str = "▲▼▸▾✓✕←↑→↓↳↘↗⇧⌃⌘★•
 
 #[test]
 fn ui_symbols_have_glyphs_when_a_symbol_face_is_installed() {
-    if !theme::symbol_face_installed() {
+    if !gridcraft_fonts::symbol_face_installed() {
         return; // a minimal machine without any symbol face; nothing to assert
     }
     let ctx = egui::Context::default();
     ctx.set_fonts(theme::font_definitions());
     let mut out = ctx.run_ui(egui::RawInput::default(), |_ui| {});
     out.textures_delta.clear(); // nothing consumes the atlas in a headless test
-    for family in [FontFamily::Proportional, FontFamily::Name(theme::CELL.into())] {
+    for family in [FontFamily::Proportional, FontFamily::Name(gridcraft_fonts::CELL.into())] {
         let font = FontId::new(14.0, family);
         let glyphs = |text: &str| {
             let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), Color32::BLACK));

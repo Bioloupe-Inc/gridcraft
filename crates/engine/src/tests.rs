@@ -2417,15 +2417,16 @@ fn cell_picture_json_save_retains_content_and_pdf_draws_without_error_text() {
     let saved = s.execute("file.saveBytes", json!({"format": "json"})).unwrap();
     s.execute("file.open", json!({"name": "pictures.json", "base64": saved["base64"]})).unwrap();
     assert_eq!(cell_picture(&s, "B2").unwrap().data, original_cell_picture());
-    let pdf = s.execute("file.exportPdf", json!({"range": "A1:C3"})).unwrap();
-    let data = crate::io::base64_decode(pdf["base64"].as_str().unwrap()).unwrap();
-    let pdf_text = String::from_utf8_lossy(&data);
-    assert!(pdf_text.contains("/Subtype /Image"));
-    assert!(!pdf_text.contains("(#VALUE!) Tj"));
+    let pages = |s: &mut Session| {
+        let pdf = s.execute("file.exportPdf", json!({"range": "A1:C3"})).unwrap();
+        let data = crate::io::base64_decode(pdf["base64"].as_str().unwrap()).unwrap();
+        gridcraft_pdf::test_support::pages(&data).unwrap()
+    };
+    let drawn = pages(&mut s);
+    assert_eq!(drawn.iter().map(|p| p.images).sum::<usize>(), 1);
+    assert!(drawn.iter().flat_map(|p| &p.glyphs).all(|g| g.text != "#"), "no #VALUE! in place of the picture");
     s.execute("home.hideRows", json!({"rows": "2:2"})).unwrap();
-    let pdf = s.execute("file.exportPdf", json!({"range": "A1:C3"})).unwrap();
-    let data = crate::io::base64_decode(pdf["base64"].as_str().unwrap()).unwrap();
-    assert!(!String::from_utf8_lossy(&data).contains("/Subtype /Image"));
+    assert_eq!(pages(&mut s).iter().map(|p| p.images).sum::<usize>(), 0);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (German ribbon catalog added) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (PDF exports non-Latin text) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Per-language status against Excel, which ships its UI in dozens of languages (Windows language
 packs cover 100+), with localized function names, argument separators, number and date formats,
@@ -32,7 +32,7 @@ right-to-left sheets and full complex-script support. Part of
   arrow keys, editor, popups and floating objects follow; text stays left-to-right inside its box
   (no bidi), and the sheet tabs, horizontal scrollbar and printing/PDF are not mirrored yet. IME input goes
   through egui/winit and is unverified for Chinese, Japanese and Korean.
-- **PDF export** uses only the 14 standard PDF fonts: non-Latin text cannot export.
+- **PDF export** embeds the fonts it draws with, with CJK, Thai, Hebrew and symbol fallbacks: non-Latin text exports. Mixed-direction lines are not reordered (no bidi).
 
 ## Languages
 
@@ -77,6 +77,7 @@ language (none so far) and of localized function names.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | PDF export embeds subset fonts (krilla): the workbook font, its metric-compatible twin or a script fallback, so any Unicode text exports |
 | 2026-10-11 | minor | German ribbon catalog (`i18n/de.rs`, 266 labels, ~12%); `de` locale tags (de-DE, de-AT, de-CH…) resolve to German. PR #163 (localized German formulas/numbers) still open |
 | 2026-10-11 | minor | Sheet Right-to-Left mirrors the grid (#146) |
 | 2026-10-11 | minor | Czech (cs) ribbon table: 266 labels (~12%), menus only |

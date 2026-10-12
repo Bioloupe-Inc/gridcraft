@@ -3,9 +3,22 @@ name = "gridcraft-pdf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GridCraft's tiny self-contained PDF 1.7 writer (standard 14 fonts, vector drawing, RGBA images)"
+description = "GridCraft's PDF writer for print and export (krilla): embedded font subsets, vector drawing, RGBA images"
 
 [lints]
 workspace = true
 
 [dependencies]
+gridcraft-fonts = { workspace = true }
+krilla = { workspace = true }
+rustybuzz = { workspace = true }
+hayro-interpret = { workspace = true, optional = true }
+kurbo = { workspace = true, optional = true }
+
+[features]
+# `test_support::page_texts`: the text a PDF reader extracts, for tests of PDF export.
+test-support = ["dep:hayro-interpret", "dep:kurbo"]
+
+[dev-dependencies]
+gridcraft-pdf = { path = ".", features = ["test-support"] }
+epaint_default_fonts = { workspace = true }
