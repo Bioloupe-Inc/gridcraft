@@ -1,253 +1,246 @@
-//! A tiny, self-contained PDF 1.7 writer for GridCraft's print and PDF export.
+//! GridCraft's PDF writer for print and PDF export, built on [krilla].
 //!
-//! - The 14 standard fonts (no embedding) with WinAnsiEncoding, plus approximate width tables
-//!   ([`text_width`]) so callers can measure, align and wrap text.
+//! - Text is set in embedded, subset TrueType/OpenType fonts (CID-keyed, with a ToUnicode map),
+//!   so any Unicode text prints and extracts exactly as written. Faces come from
+//!   [`gridcraft_fonts::resolve`]: the workbook's font, else its metric-compatible twin or role
+//!   stand-in, with script fallbacks (CJK, Thai, Hebrew, symbols) for characters it lacks.
+//!   [`text_width`] measures with the same faces and shaping the page draws with.
 //! - Vector drawing: rectangles, lines (solid or dashed), polygons, circles (Bézier), clipping.
-//! - RGBA images as RGB image XObjects with a soft mask for alpha (run-length encoded).
+//! - RGBA images.
 //! - Coordinates are points with a **top-left origin** (y grows down); text `y` is the baseline.
-//!
-//! Streams are written uncompressed (images use the trivial RunLengthDecode filter) so the crate
-//! needs no dependencies.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
-mod metrics;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::Arc;
 
-use std::fmt::Write as _;
+use gridcraft_fonts::FontData;
+use krilla::geom::{Path, PathBuilder, Point, Rect, Size, Transform};
+use krilla::image::Image;
+use krilla::metadata::Metadata;
+use krilla::page::PageSettings;
+use krilla::paint::{Fill, FillRule, LineJoin, Stroke, StrokeDash};
+use krilla::surface::Surface;
+use krilla::text::{GlyphId, KrillaGlyph};
+use rustybuzz::ttf_parser::Tag;
+use rustybuzz::{Direction, Feature, Language, Script, ShapePlan};
 
 /// RGB colour, 0–255 per channel.
 pub type Rgb = [u8; 3];
 
-/// The standard 14 fonts minus Symbol and ZapfDingbats.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Font {
-    #[default]
-    Helvetica,
-    HelveticaBold,
-    HelveticaOblique,
-    HelveticaBoldOblique,
-    TimesRoman,
-    TimesBold,
-    TimesItalic,
-    TimesBoldItalic,
-    Courier,
-    CourierBold,
-    CourierOblique,
-    CourierBoldOblique,
-}
-
-/// A font family for [`Font::styled`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Family {
-    #[default]
-    Sans,
-    Serif,
-    Mono,
+/// A font as a workbook names it: family, weight and slant.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Font {
+    family: Arc<str>,
+    bold: bool,
+    italic: bool,
 }
 
 impl Font {
-    pub const ALL: [Font; 12] = [
-        Font::Helvetica,
-        Font::HelveticaBold,
-        Font::HelveticaOblique,
-        Font::HelveticaBoldOblique,
-        Font::TimesRoman,
-        Font::TimesBold,
-        Font::TimesItalic,
-        Font::TimesBoldItalic,
-        Font::Courier,
-        Font::CourierBold,
-        Font::CourierOblique,
-        Font::CourierBoldOblique,
-    ];
-
-    /// PostScript base font name.
-    pub fn base_name(self) -> &'static str {
-        match self {
-            Font::Helvetica => "Helvetica",
-            Font::HelveticaBold => "Helvetica-Bold",
-            Font::HelveticaOblique => "Helvetica-Oblique",
-            Font::HelveticaBoldOblique => "Helvetica-BoldOblique",
-            Font::TimesRoman => "Times-Roman",
-            Font::TimesBold => "Times-Bold",
-            Font::TimesItalic => "Times-Italic",
-            Font::TimesBoldItalic => "Times-BoldItalic",
-            Font::Courier => "Courier",
-            Font::CourierBold => "Courier-Bold",
-            Font::CourierOblique => "Courier-Oblique",
-            Font::CourierBoldOblique => "Courier-BoldOblique",
-        }
+    pub fn new(family: &str, bold: bool, italic: bool) -> Font {
+        Font { family: family.into(), bold, italic }
     }
+}
 
-    fn index(self) -> usize {
-        Font::ALL.iter().position(|f| *f == self).unwrap_or(0)
-    }
+/// Text without any face to draw it with (no font on the machine or registered) is still laid
+/// out, at this many ems per character, and left out of the page.
+const NO_FACE_ADVANCE: f32 = 0.5;
 
-    /// The face of `family` with the given weight and slant.
-    pub fn styled(family: Family, bold: bool, italic: bool) -> Font {
-        match (family, bold, italic) {
-            (Family::Sans, false, false) => Font::Helvetica,
-            (Family::Sans, true, false) => Font::HelveticaBold,
-            (Family::Sans, false, true) => Font::HelveticaOblique,
-            (Family::Sans, true, true) => Font::HelveticaBoldOblique,
-            (Family::Serif, false, false) => Font::TimesRoman,
-            (Family::Serif, true, false) => Font::TimesBold,
-            (Family::Serif, false, true) => Font::TimesItalic,
-            (Family::Serif, true, true) => Font::TimesBoldItalic,
-            (Family::Mono, false, false) => Font::Courier,
-            (Family::Mono, true, false) => Font::CourierBold,
-            (Family::Mono, false, true) => Font::CourierOblique,
-            (Family::Mono, true, true) => Font::CourierBoldOblique,
-        }
-    }
+/// A run of `text` set in one face.
+struct Run {
+    face: FontData,
+    range: Range<usize>,
+}
 
-    /// Picks a standard family for a font name: serif faces map to Times, monospaced ones to
-    /// Courier, everything else to Helvetica.
-    pub fn family_for(name: &str) -> Family {
-        let n = name.to_ascii_lowercase();
-        const SERIF: [&str; 10] = ["times", "cambria", "georgia", "garamond", "serif", "book", "palatino", "baskerville", "tinos", "caladea"];
-        const MONO: [&str; 8] = ["courier", "consolas", "mono", "menlo", "lucida console", "cousine", "code", "typewriter"];
-        if MONO.iter().any(|m| n.contains(m)) {
-            Family::Mono
-        } else if SERIF.iter().any(|s| n.contains(s)) && !n.contains("sans") {
-            Family::Serif
-        } else {
-            Family::Sans
-        }
-    }
-
-    /// Advance width of a character in 1/1000 em.
-    pub fn char_width(self, c: char) -> u16 {
-        let table: Option<&[u16; 95]> = match self {
-            Font::Helvetica | Font::HelveticaOblique => Some(&metrics::HELVETICA),
-            Font::HelveticaBold | Font::HelveticaBoldOblique => Some(&metrics::HELVETICA_BOLD),
-            Font::TimesRoman | Font::TimesItalic => Some(&metrics::TIMES),
-            Font::TimesBold | Font::TimesBoldItalic => Some(&metrics::TIMES_BOLD),
-            _ => None,
+/// Splits `text` into runs by face: each character goes to the first face in the font's chain that
+/// has a glyph for it (spaces and combining marks stay with the run they're in), so a Latin cell
+/// with a few superscripts and a Han word uses the cell font, a symbol face and a CJK face, and
+/// goes back to the cell font after them. A character no face covers stays in the current run.
+/// Empty when no face is available at all.
+fn runs(font: &Font, text: &str) -> Vec<Run> {
+    let chain = gridcraft_fonts::resolve(&font.family, font.bold, font.italic);
+    let covering = |c: char| (0..chain.len()).find_map(|i| chain.face(i).filter(|f| covers(f, c)).map(|f| (i, f)));
+    let Some(first) = (0..chain.len()).find_map(|i| chain.face(i).map(|f| (i, f))) else { return Vec::new() };
+    let mut out: Vec<(usize, &FontData, Range<usize>)> = Vec::new();
+    for (at, c) in text.char_indices() {
+        let end = at + c.len_utf8();
+        let keep = c.is_whitespace() || c.is_control() || is_mark(c);
+        let pick = match out.last() {
+            Some((i, f, _)) if keep => Some((*i, *f)),
+            _ => covering(c),
         };
-        let Some(table) = table else { return 600 };
-        let ascii = |c: char| -> Option<u16> {
-            let i = (c as u32).checked_sub(32)? as usize;
-            table.get(i).copied()
-        };
-        if let Some(w) = ascii(c) {
-            return w;
-        }
-        match c {
-            '—' | '…' | '‰' | '™' => 1000,
-            _ => metrics::fold(c).and_then(ascii).unwrap_or(match self {
-                Font::TimesRoman | Font::TimesItalic | Font::TimesBold | Font::TimesBoldItalic => 500,
-                _ => 556,
-            }),
+        let (i, f) = pick.or_else(|| out.last().map(|(i, f, _)| (*i, *f))).unwrap_or(first);
+        match out.last_mut() {
+            Some((j, _, r)) if *j == i => r.end = end,
+            _ => out.push((i, f, at..end)),
         }
     }
+    out.into_iter().map(|(_, face, range)| Run { face: face.clone(), range }).collect()
+}
+
+/// Combining marks (accents written as separate code points) draw with their base character.
+fn is_mark(c: char) -> bool {
+    matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F | 0xFE00..=0xFE0F | 0x200C | 0x200D)
+}
+
+/// A parsed face and the shaping plans compiled for it so far (compiling a plan costs more than
+/// shaping a cell's text with it).
+struct Shaper {
+    face: rustybuzz::Face<'static>,
+    plans: HashMap<(Direction, Script, Option<Language>), ShapePlan>,
+}
+
+thread_local! {
+    /// One shaper per font file and face index. Their bytes stay alive for the rest of the run (the
+    /// font database never drops a face it read), so each face is parsed once.
+    static SHAPERS: RefCell<HashMap<(usize, u32), Option<Shaper>>> = RefCell::new(HashMap::new());
+}
+
+/// Runs `f` on the face's shaper; `None` when the face doesn't parse.
+fn with_shaper<R>(face: &FontData, f: impl FnOnce(&mut Shaper) -> R) -> Option<R> {
+    SHAPERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let shaper = cache.entry((face.data.as_ptr() as usize, face.index)).or_insert_with(|| {
+            let bytes: &'static Arc<[u8]> = Box::leak(Box::new(face.data.clone()));
+            rustybuzz::Face::from_slice(bytes, face.index).map(|face| Shaper { face, plans: HashMap::new() })
+        });
+        shaper.as_mut().map(f)
+    })
+}
+
+/// Whether the face has a glyph for `c`.
+fn covers(face: &FontData, c: char) -> bool {
+    with_shaper(face, |s| s.face.glyph_index(c).is_some()).unwrap_or(false)
+}
+
+/// `text` shaped in one face: its glyphs (advances in ems, each mapped to the text it stands for)
+/// and its total advance in ems. Script and direction are guessed from the text. Kerning and
+/// standard ligatures are off, as a spreadsheet sets cell text: a string is as wide as its glyphs'
+/// advances, so text measures (and wraps) the same in every face with the same widths.
+struct Shaped {
+    glyphs: Vec<KrillaGlyph>,
+    advance: f32,
+}
+
+fn shape(face: &FontData, text: &str) -> Option<Shaped> {
+    with_shaper(face, |s| {
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let dir = buffer.direction();
+        if dir == Direction::Invalid {
+            return None;
+        }
+        let key = (dir, buffer.script(), buffer.language());
+        let plan = s.plans.entry(key.clone()).or_insert_with(|| {
+            let off = |tag: &[u8; 4]| Feature::new(Tag::from_bytes(tag), 0, ..);
+            ShapePlan::new(&s.face, key.0, Some(key.1), key.2.as_ref(), &[off(b"kern"), off(b"liga"), off(b"clig")])
+        });
+        let out = rustybuzz::shape_with_plan(&s.face, plan, buffer);
+        let upem = s.face.units_per_em().max(1) as f32;
+        let infos = out.glyph_infos();
+        let forward = matches!(dir, Direction::LeftToRight | Direction::TopToBottom);
+        let mut glyphs = Vec::with_capacity(infos.len());
+        let mut advance = 0.0;
+        for (i, (info, pos)) in infos.iter().zip(out.glyph_positions()).enumerate() {
+            // The text a glyph stands for runs to the next cluster in logical order.
+            let (before, after) = infos.split_at(i);
+            let next =
+                if forward { after.iter().find(|g| g.cluster != info.cluster) } else { before.iter().rev().find(|g| g.cluster != info.cluster) };
+            let start = (info.cluster as usize).min(text.len());
+            let end = next.map_or(text.len(), |g| g.cluster as usize).clamp(start, text.len());
+            let x_advance = pos.x_advance as f32 / upem;
+            advance += x_advance;
+            glyphs.push(KrillaGlyph::new(
+                GlyphId::new(info.glyph_id),
+                x_advance,
+                pos.x_offset as f32 / upem,
+                pos.y_offset as f32 / upem,
+                pos.y_advance as f32 / upem,
+                start..end,
+                None,
+            ));
+        }
+        Some(Shaped { glyphs, advance })
+    })
+    .flatten()
+}
+
+/// Advance width of `text` set in `face`, in ems.
+fn run_advance(face: &FontData, text: &str) -> f32 {
+    shape(face, text).map_or(text.chars().count() as f32 * NO_FACE_ADVANCE, |s| s.advance)
 }
 
 /// Width of `text` in points when set in `font` at `size` points.
-pub fn text_width(font: Font, size: f32, text: &str) -> f32 {
-    let units: u32 = text.chars().map(|c| font.char_width(c) as u32).sum();
-    units as f32 * size / 1000.0
-}
-
-/// Unicode → WinAnsiEncoding (CP1252) byte; unmappable characters become `?`.
-pub fn win_ansi(c: char) -> u8 {
-    let u = c as u32;
-    if (0x20..0x7F).contains(&u) || (0xA0..=0xFF).contains(&u) {
-        return u as u8;
+pub fn text_width(font: &Font, size: f32, text: &str) -> f32 {
+    if text.is_empty() {
+        return 0.0;
     }
-    match c {
-        '€' => 0x80,
-        '‚' => 0x82,
-        'ƒ' => 0x83,
-        '„' => 0x84,
-        '…' => 0x85,
-        '†' => 0x86,
-        '‡' => 0x87,
-        'ˆ' => 0x88,
-        '‰' => 0x89,
-        'Š' => 0x8A,
-        '‹' => 0x8B,
-        'Œ' => 0x8C,
-        'Ž' => 0x8E,
-        '‘' => 0x91,
-        '’' => 0x92,
-        '“' => 0x93,
-        '”' => 0x94,
-        '•' => 0x95,
-        '–' => 0x96,
-        '—' => 0x97,
-        '˜' => 0x98,
-        '™' => 0x99,
-        'š' => 0x9A,
-        '›' => 0x9B,
-        'œ' => 0x9C,
-        'ž' => 0x9E,
-        'Ÿ' => 0x9F,
-        '\t' => b' ',
-        _ => b'?',
-    }
-}
-
-/// A PDF literal string `( … )` for `text` in WinAnsiEncoding.
-fn pdf_string(text: &str) -> String {
-    let mut s = String::with_capacity(text.len() + 2);
-    s.push('(');
-    for c in text.chars() {
-        let b = win_ansi(c);
-        match b {
-            b'(' | b')' | b'\\' => {
-                s.push('\\');
-                s.push(b as char);
-            }
-            0x20..=0x7E => s.push(b as char),
-            _ => {
-                let _ = write!(s, "\\{b:03o}");
-            }
-        }
-    }
-    s.push(')');
-    s
-}
-
-/// A number for a content stream: finite, short.
-fn n(v: f32) -> String {
-    let v = if v.is_finite() { v.clamp(-1.0e7, 1.0e7) } else { 0.0 };
-    let r = (v * 1000.0).round() / 1000.0;
-    if r == r.trunc() {
-        format!("{}", r as i64)
+    let runs = runs(font, text);
+    let ems: f32 = if runs.is_empty() {
+        text.chars().count() as f32 * NO_FACE_ADVANCE
     } else {
-        let s = format!("{r:.3}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
+        runs.iter().map(|r| run_advance(&r.face, text.get(r.range.clone()).unwrap_or_default())).sum()
+    };
+    ems * size
 }
 
-fn rgb_op(c: Rgb, stroke: bool) -> String {
-    let f = |v: u8| n(v as f32 / 255.0);
-    format!("{} {} {} {}", f(c[0]), f(c[1]), f(c[2]), if stroke { "RG" } else { "rg" })
+/// Most drawing operations per page before further drawing is dropped (keeps hostile inputs from
+/// exhausting memory).
+const MAX_PAGE_OPS: usize = 2_000_000;
+/// Largest image (pixels) embedded.
+const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+
+enum Op {
+    Save,
+    Restore,
+    Clip(Path),
+    Draw { path: Path, fill: Option<Rgb>, stroke: Option<Line> },
+    Text { x: f32, y: f32, size: f32, font: Font, color: Rgb, text: String, angle: f32 },
+    Image { x: f32, y: f32, size: Size, image: Image },
 }
 
-struct ImageData {
-    width: u32,
-    height: u32,
-    rgb: Vec<u8>,
-    alpha: Option<Vec<u8>>,
+/// How a path is stroked.
+struct Line {
+    color: Rgb,
+    width: f32,
+    dash: Vec<f32>,
+    /// Round joins (polylines and polygons) instead of mitred ones.
+    round: bool,
 }
 
 /// A page under construction. Obtain one with [`PdfDoc::add_page`].
 pub struct Page {
     width: f32,
     height: f32,
-    content: String,
-    fonts: [bool; 12],
-    images: Vec<ImageData>,
+    ops: Vec<Op>,
     depth: u32,
 }
 
-/// Most bytes of content per page before further drawing is dropped (keeps hostile inputs from
-/// exhausting memory).
-const MAX_PAGE_CONTENT: usize = 64 * 1024 * 1024;
-/// Largest image (pixels) embedded.
-const MAX_IMAGE_PIXELS: u64 = 40_000_000;
+fn rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    pb.push_rect(Rect::from_xywh(x, y, w, h)?);
+    pb.finish()
+}
+
+fn poly_path(pts: &[[f32; 2]], close: bool) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    let (first, rest) = pts.split_first()?;
+    pb.move_to(first[0], first[1]);
+    for p in rest {
+        pb.line_to(p[0], p[1]);
+    }
+    if close {
+        pb.close();
+    }
+    pb.finish()
+}
+
+fn finite(v: f32) -> bool {
+    v.is_finite() && v.abs() < 1.0e7
+}
 
 impl Page {
     pub fn width(&self) -> f32 {
@@ -256,48 +249,46 @@ impl Page {
     pub fn height(&self) -> f32 {
         self.height
     }
-    fn y(&self, y: f32) -> f32 {
-        self.height - y
-    }
-    fn full(&self) -> bool {
-        self.content.len() > MAX_PAGE_CONTENT
-    }
-    fn op(&mut self, s: &str) {
-        if !self.full() {
-            self.content.push_str(s);
-            self.content.push('\n');
+    fn op(&mut self, op: Op) {
+        if self.ops.len() < MAX_PAGE_OPS {
+            self.ops.push(op);
         }
     }
 
     /// Saves the graphics state (pair with [`Page::restore`]).
     pub fn save(&mut self) {
         self.depth = self.depth.saturating_add(1);
-        self.content.push_str("q\n");
+        self.ops.push(Op::Save);
     }
     /// Restores the graphics state saved by [`Page::save`]; extra calls are ignored.
     pub fn restore(&mut self) {
         if self.depth > 0 {
             self.depth -= 1;
-            self.content.push_str("Q\n");
+            self.ops.push(Op::Restore);
         }
     }
     /// Intersects the clip with a rectangle (until the next [`Page::restore`]).
     pub fn clip_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        let s = format!("{} {} {} {} re W n", n(x), n(self.y(y + h)), n(w.max(0.0)), n(h.max(0.0)));
-        self.op(&s);
+        // An empty or invalid clip hides everything drawn under it.
+        let path = rect_path(x, y, w.max(0.0), h.max(0.0)).or_else(|| rect_path(0.0, 0.0, 0.0001, 0.0001));
+        if let Some(p) = path {
+            self.op(Op::Clip(p));
+        }
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgb) {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        let s = format!("{}\n{} {} {} {} re f", rgb_op(color, false), n(x), n(self.y(y + h)), n(w), n(h));
-        self.op(&s);
+        if let Some(p) = rect_path(x, y, w, h) {
+            self.op(Op::Draw { path: p, fill: Some(color), stroke: None });
+        }
     }
 
     pub fn rect_stroke(&mut self, x: f32, y: f32, w: f32, h: f32, width: f32, color: Rgb) {
-        let s = format!("{}\n{} w [] 0 d\n{} {} {} {} re S", rgb_op(color, true), n(width), n(x), n(self.y(y + h)), n(w), n(h));
-        self.op(&s);
+        if let Some(path) = rect_path(x, y, w, h) {
+            self.op(Op::Draw { path, fill: None, stroke: Some(Line { color, width, dash: Vec::new(), round: false }) });
+        }
     }
 
     pub fn stroke_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgb) {
@@ -306,10 +297,9 @@ impl Page {
 
     /// A line with a dash pattern (`[on, off, …]` in points; empty = solid).
     pub fn stroke_line_dashed(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgb, dash: &[f32]) {
-        let d: Vec<String> = dash.iter().take(8).map(|v| n(v.max(0.0))).collect();
-        let s =
-            format!("{}\n{} w [{}] 0 d\n{} {} m {} {} l S", rgb_op(color, true), n(width), d.join(" "), n(x0), n(self.y(y0)), n(x1), n(self.y(y1)));
-        self.op(&s);
+        if let Some(path) = poly_path(&[[x0, y0], [x1, y1]], false) {
+            self.op(Op::Draw { path, fill: None, stroke: Some(Line { color, width, dash: dash.to_vec(), round: false }) });
+        }
     }
 
     /// An open polyline.
@@ -317,42 +307,24 @@ impl Page {
         if pts.len() < 2 {
             return;
         }
-        let d: Vec<String> = dash.iter().take(8).map(|v| n(v.max(0.0))).collect();
-        let mut s = format!("{}\n{} w [{}] 0 d 1 j\n", rgb_op(color, true), n(width), d.join(" "));
-        self.path(&mut s, pts, false);
-        s.push_str(" S");
-        self.op(&s);
-    }
-
-    fn path(&self, s: &mut String, pts: &[[f32; 2]], close: bool) {
-        for (i, p) in pts.iter().enumerate() {
-            let _ = write!(s, "{} {} {} ", n(p[0]), n(self.y(p[1])), if i == 0 { "m" } else { "l" });
-        }
-        if close {
-            s.push('h');
+        if let Some(path) = poly_path(pts, false) {
+            self.op(Op::Draw { path, fill: None, stroke: Some(Line { color, width, dash: dash.to_vec(), round: true }) });
         }
     }
 
     /// A closed polygon, filled and/or stroked.
     pub fn polygon(&mut self, pts: &[[f32; 2]], fill: Option<Rgb>, stroke: Option<(Rgb, f32)>) {
-        if pts.len() < 2 || (fill.is_none() && stroke.is_none()) {
+        if pts.len() < 2 {
             return;
         }
-        let mut s = String::new();
-        if let Some(f) = fill {
-            s.push_str(&rgb_op(f, false));
-            s.push('\n');
+        let Some(path) = poly_path(pts, true) else { return };
+        self.fill_stroke(path, fill, stroke, true);
+    }
+
+    fn fill_stroke(&mut self, path: Path, fill: Option<Rgb>, stroke: Option<(Rgb, f32)>, round: bool) {
+        if fill.is_some() || stroke.is_some() {
+            self.op(Op::Draw { path, fill, stroke: stroke.map(|(color, width)| Line { color, width, dash: Vec::new(), round }) });
         }
-        if let Some((c, w)) = stroke {
-            let _ = writeln!(s, "{}\n{} w [] 0 d 1 j", rgb_op(c, true), n(w));
-        }
-        self.path(&mut s, pts, true);
-        s.push_str(match (fill.is_some(), stroke.is_some()) {
-            (true, true) => " B",
-            (true, false) => " f",
-            _ => " S",
-        });
-        self.op(&s);
     }
 
     /// A circle approximated by four cubic Béziers.
@@ -362,105 +334,44 @@ impl Page {
         }
         const K: f32 = 0.552_284_8;
         let k = r * K;
-        let y = self.y(cy);
-        let mut s = String::new();
-        if let Some(f) = fill {
-            s.push_str(&rgb_op(f, false));
-            s.push('\n');
+        let mut pb = PathBuilder::new();
+        pb.move_to(cx + r, cy);
+        pb.cubic_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+        pb.cubic_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+        pb.cubic_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+        pb.cubic_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
+        pb.close();
+        if let Some(path) = pb.finish() {
+            self.fill_stroke(path, fill, stroke, false);
         }
-        if let Some((c, w)) = stroke {
-            let _ = writeln!(s, "{}\n{} w [] 0 d", rgb_op(c, true), n(w));
-        }
-        let _ = write!(
-            s,
-            "{} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c h",
-            n(cx + r),
-            n(y),
-            n(cx + r),
-            n(y + k),
-            n(cx + k),
-            n(y + r),
-            n(cx),
-            n(y + r),
-            n(cx - k),
-            n(y + r),
-            n(cx - r),
-            n(y + k),
-            n(cx - r),
-            n(y),
-            n(cx - r),
-            n(y - k),
-            n(cx - k),
-            n(y - r),
-            n(cx),
-            n(y - r),
-            n(cx + k),
-            n(y - r),
-            n(cx + r),
-            n(y - k),
-            n(cx + r),
-            n(y)
-        );
-        s.push_str(match (fill.is_some(), stroke.is_some()) {
-            (true, true) => " B",
-            (true, false) => " f",
-            _ => " S",
-        });
-        self.op(&s);
     }
 
     /// Text with its baseline starting at `(x, y)`.
-    pub fn text(&mut self, x: f32, y: f32, size: f32, font: Font, color: Rgb, text: &str) {
+    pub fn text(&mut self, x: f32, y: f32, size: f32, font: &Font, color: Rgb, text: &str) {
         self.text_rotated(x, y, size, font, color, text, 0.0);
     }
 
     /// Text rotated by `angle` radians (clockwise on the page, like the y-down coordinate
     /// system) about its baseline origin.
-    pub fn text_rotated(&mut self, x: f32, y: f32, size: f32, font: Font, color: Rgb, text: &str, angle: f32) {
-        if text.is_empty() || !(size.is_finite() && size > 0.0) {
+    pub fn text_rotated(&mut self, x: f32, y: f32, size: f32, font: &Font, color: Rgb, text: &str, angle: f32) {
+        let drawable = !text.is_empty() && size.is_finite() && size > 0.0 && finite(x) && finite(y);
+        if !drawable {
             return;
         }
-        let fi = font.index();
-        if let Some(f) = self.fonts.get_mut(fi) {
-            *f = true;
-        }
-        let (sn, cs) = if angle.is_finite() { angle.sin_cos() } else { (0.0, 1.0) };
-        // Clockwise in y-down = counter-clockwise negated in PDF's y-up space.
-        let s = format!(
-            "BT\n{}\n/F{} {} Tf\n{} {} {} {} {} {} Tm\n{} Tj\nET",
-            rgb_op(color, false),
-            fi + 1,
-            n(size.min(10_000.0)),
-            n(cs),
-            n(-sn),
-            n(sn),
-            n(cs),
-            n(x),
-            n(self.y(y)),
-            pdf_string(text)
-        );
-        self.op(&s);
+        let angle = if angle.is_finite() { angle } else { 0.0 };
+        self.op(Op::Text { x, y, size: size.min(10_000.0), font: font.clone(), color, text: text.to_string(), angle });
     }
 
     /// Draws an RGBA image (`pw`×`ph` pixels, row-major, straight alpha) into the box
     /// `(x, y, w, h)`. Malformed or oversized buffers are ignored.
     pub fn image_rgba(&mut self, x: f32, y: f32, w: f32, h: f32, rgba: &[u8], pw: u32, ph: u32) {
         let px = pw as u64 * ph as u64;
-        if pw == 0 || ph == 0 || px > MAX_IMAGE_PIXELS || (rgba.len() as u64) < px * 4 || w <= 0.0 || h <= 0.0 {
+        if pw == 0 || ph == 0 || px > MAX_IMAGE_PIXELS || (rgba.len() as u64) < px * 4 || !finite(x) || !finite(y) {
             return;
         }
-        let px = px as usize;
-        let mut rgb = Vec::with_capacity(px * 3);
-        let mut alpha = Vec::with_capacity(px);
-        for p in rgba.as_chunks::<4>().0.iter().take(px) {
-            rgb.extend_from_slice(&[p[0], p[1], p[2]]);
-            alpha.push(p[3]);
-        }
-        let alpha = if alpha.iter().all(|a| *a == 255) { None } else { Some(alpha) };
-        let idx = self.images.len();
-        self.images.push(ImageData { width: pw, height: ph, rgb, alpha });
-        let s = format!("q {} 0 0 {} {} {} cm /Im{} Do Q", n(w), n(h), n(x), n(self.y(y + h)), idx + 1);
-        self.op(&s);
+        let Some(size) = Size::from_wh(w, h) else { return };
+        let data = rgba.get(..(px * 4) as usize).unwrap_or_default().to_vec();
+        self.op(Op::Image { x, y, size, image: Image::from_rgba8(data, pw, ph) });
     }
 }
 
@@ -472,6 +383,18 @@ pub struct Info {
     pub creator: String,
 }
 
+/// Why a document could not be written.
+#[derive(Debug)]
+pub struct PdfError(String);
+
+impl std::fmt::Display for PdfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PDF export failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for PdfError {}
+
 /// A PDF document under construction.
 #[derive(Default)]
 pub struct PdfDoc {
@@ -479,45 +402,107 @@ pub struct PdfDoc {
     pub info: Info,
 }
 
-/// PackBits-style run-length encoding (PDF `RunLengthDecode`).
-fn run_length(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() / 2 + 16);
-    let mut i = 0;
-    while i < data.len() {
-        let b = data[i];
-        let mut run = 1;
-        while i + run < data.len() && run < 128 && data[i + run] == b {
-            run += 1;
-        }
-        if run >= 2 {
-            out.push((257 - run) as u8);
-            out.push(b);
-            i += run;
-            continue;
-        }
-        // Literal run until the next repeat of 3+ or 128 bytes.
-        let start = i;
-        let mut len = 0;
-        while i < data.len() && len < 128 {
-            if i + 2 < data.len() && data[i] == data[i + 1] && data[i] == data[i + 2] {
-                break;
-            }
-            i += 1;
-            len += 1;
-        }
-        if len == 0 {
-            // Next is a repeat; loop will handle it.
-            continue;
-        }
-        out.push((len - 1) as u8);
-        out.extend_from_slice(&data[start..start + len]);
-    }
-    out.push(128);
-    out
+fn fill_of(c: Rgb) -> Fill {
+    Fill { paint: krilla::color::rgb::Color::new(c[0], c[1], c[2]).into(), ..Default::default() }
 }
 
-fn pdf_text_string(s: &str) -> String {
-    pdf_string(s)
+fn stroke_of(l: &Line) -> Stroke {
+    let dash: Vec<f32> = l.dash.iter().take(8).map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 }).collect();
+    Stroke {
+        paint: krilla::color::rgb::Color::new(l.color[0], l.color[1], l.color[2]).into(),
+        width: if l.width.is_finite() { l.width.clamp(0.0, 1.0e4) } else { 1.0 },
+        line_join: if l.round { LineJoin::Round } else { LineJoin::Miter },
+        dash: dash.iter().any(|v| *v > 0.0).then_some(StrokeDash { array: dash, offset: 0.0 }),
+        ..Default::default()
+    }
+}
+
+/// Font bytes shared with krilla without a copy.
+struct Bytes(Arc<[u8]>);
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The krilla fonts of one document, one per face.
+#[derive(Default)]
+struct Fonts(HashMap<(usize, u32), Option<krilla::text::Font>>);
+
+impl Fonts {
+    fn get(&mut self, face: &FontData) -> Option<krilla::text::Font> {
+        let key = (face.data.as_ptr() as usize, face.index);
+        self.0
+            .entry(key)
+            .or_insert_with(|| {
+                let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(Bytes(face.data.clone()));
+                krilla::text::Font::new(data.into(), face.index)
+            })
+            .clone()
+    }
+}
+
+fn draw_text(s: &mut Surface<'_>, fonts: &mut Fonts, x: f32, y: f32, size: f32, font: &Font, text: &str) {
+    let mut at = x;
+    for run in runs(font, text) {
+        let part = text.get(run.range.clone()).unwrap_or_default();
+        let Some(shaped) = shape(&run.face, part) else { continue };
+        if let Some(f) = fonts.get(&run.face) {
+            s.draw_glyphs(Point::from_xy(at, y), &shaped.glyphs, f, part, size, false);
+        }
+        at += shaped.advance * size;
+    }
+}
+
+fn draw_page(s: &mut Surface<'_>, fonts: &mut Fonts, ops: &[Op]) {
+    // Pushes (clips) since each open save, so a restore pops exactly what its save opened.
+    let mut saves: Vec<usize> = vec![0];
+    for op in ops {
+        match op {
+            Op::Save => saves.push(0),
+            Op::Restore => {
+                for _ in 0..saves.pop().unwrap_or(0) {
+                    s.pop();
+                }
+                if saves.is_empty() {
+                    saves.push(0);
+                }
+            }
+            Op::Clip(path) => {
+                s.push_clip_path(path, &FillRule::NonZero);
+                if let Some(n) = saves.last_mut() {
+                    *n += 1;
+                }
+            }
+            Op::Draw { path, fill, stroke } => {
+                s.set_fill(fill.map(fill_of));
+                s.set_stroke(stroke.as_ref().map(stroke_of));
+                s.draw_path(path);
+            }
+            Op::Text { x, y, size, font, color, text, angle } => {
+                s.set_stroke(None);
+                s.set_fill(Some(fill_of(*color)));
+                if *angle != 0.0 {
+                    s.push_transform(&Transform::from_rotate_at(angle.to_degrees(), *x, *y));
+                    draw_text(s, fonts, *x, *y, *size, font, text);
+                    s.pop();
+                } else {
+                    draw_text(s, fonts, *x, *y, *size, font, text);
+                }
+            }
+            Op::Image { x, y, size, image } => {
+                s.push_transform(&Transform::from_translate(*x, *y));
+                s.draw_image(image.clone(), *size);
+                s.pop();
+            }
+        }
+    }
+    for n in saves {
+        for _ in 0..n {
+            s.pop();
+        }
+    }
 }
 
 impl PdfDoc {
@@ -529,7 +514,7 @@ impl PdfDoc {
     pub fn add_page(&mut self, width_pt: f32, height_pt: f32) -> &mut Page {
         let width = if width_pt.is_finite() { width_pt.clamp(3.0, 14_400.0) } else { 612.0 };
         let height = if height_pt.is_finite() { height_pt.clamp(3.0, 14_400.0) } else { 792.0 };
-        self.pages.push(Page { width, height, content: String::new(), fonts: [false; 12], images: Vec::new(), depth: 0 });
+        self.pages.push(Page { width, height, ops: Vec::new(), depth: 0 });
         let i = self.pages.len() - 1;
         &mut self.pages[i]
     }
@@ -544,136 +529,35 @@ impl PdfDoc {
     }
 
     /// Serializes the document. A document without pages gets one blank Letter page.
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(mut self) -> Result<Vec<u8>, PdfError> {
         if self.pages.is_empty() {
             self.add_page(612.0, 792.0);
         }
-        // Object numbering: 1 catalog, 2 page tree, 3 info, then fonts, then per page.
-        let mut used = [false; 12];
-        for p in &self.pages {
-            for (u, f) in used.iter_mut().zip(p.fonts.iter()) {
-                *u |= *f;
-            }
-        }
-        let mut next = 4u32;
-        let mut font_ids = [0u32; 12];
-        for (i, u) in used.iter().enumerate() {
-            if *u {
-                font_ids[i] = next;
-                next += 1;
-            }
-        }
-        let mut objects: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut kids = Vec::new();
-        let mut font_dict = String::new();
-        for (i, id) in font_ids.iter().enumerate() {
-            if *id != 0 {
-                let _ = write!(font_dict, "/F{} {} 0 R ", i + 1, id);
-                let name = Font::ALL.get(i).copied().unwrap_or_default().base_name();
-                let enc = if name.starts_with("Symbol") { "" } else { " /Encoding /WinAnsiEncoding" };
-                objects.push((*id, format!("<< /Type /Font /Subtype /Type1 /BaseFont /{name}{enc} >>").into_bytes()));
-            }
-        }
-        for page in &mut self.pages {
-            while page.depth > 0 {
-                page.restore();
-            }
-            let mut xobjects = String::new();
-            for (k, img) in page.images.iter().enumerate() {
-                let img_id = next;
-                next += 1;
-                let smask = match &img.alpha {
-                    Some(a) => {
-                        let id = next;
-                        next += 1;
-                        let data = run_length(a);
-                        let mut o = format!(
-                            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /RunLengthDecode /Length {} >>\nstream\n",
-                            img.width,
-                            img.height,
-                            data.len()
-                        )
-                        .into_bytes();
-                        o.extend_from_slice(&data);
-                        o.extend_from_slice(b"\nendstream");
-                        objects.push((id, o));
-                        format!(" /SMask {id} 0 R")
-                    }
-                    None => String::new(),
-                };
-                let data = run_length(&img.rgb);
-                let mut o = format!(
-                    "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8{} /Filter /RunLengthDecode /Length {} >>\nstream\n",
-                    img.width,
-                    img.height,
-                    smask,
-                    data.len()
-                )
-                .into_bytes();
-                o.extend_from_slice(&data);
-                o.extend_from_slice(b"\nendstream");
-                objects.push((img_id, o));
-                let _ = write!(xobjects, "/Im{} {} 0 R ", k + 1, img_id);
-            }
-            let content_id = next;
-            let page_id = next + 1;
-            next += 2;
-            let body = std::mem::take(&mut page.content);
-            let mut o = format!("<< /Length {} >>\nstream\n", body.len()).into_bytes();
-            o.extend_from_slice(body.as_bytes());
-            o.extend_from_slice(b"endstream");
-            objects.push((content_id, o));
-            let xo = if xobjects.is_empty() { String::new() } else { format!(" /XObject << {xobjects}>>") };
-            objects.push((
-                page_id,
-                format!(
-                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /ProcSet [/PDF /Text /ImageB /ImageC] /Font << {}>>{} >> /Contents {} 0 R >>",
-                    n(page.width),
-                    n(page.height),
-                    font_dict,
-                    xo,
-                    content_id
-                )
-                .into_bytes(),
-            ));
-            kids.push(page_id);
-        }
-        objects.push((1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()));
-        let kids_s: Vec<String> = kids.iter().map(|k| format!("{k} 0 R")).collect();
-        objects.push((2, format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids_s.join(" "), kids.len()).into_bytes()));
+        let mut pdf = krilla::Document::new();
         let creator = if self.info.creator.is_empty() { "GridCraft" } else { &self.info.creator };
-        let mut info = format!("<< /Producer {} /Creator {}", pdf_text_string("GridCraft PDF"), pdf_text_string(creator));
+        let mut meta = Metadata::new().producer("GridCraft PDF".into()).creator(creator.into());
         if !self.info.title.is_empty() {
-            let _ = write!(info, " /Title {}", pdf_text_string(&self.info.title));
+            meta = meta.title(self.info.title.clone());
         }
         if !self.info.author.is_empty() {
-            let _ = write!(info, " /Author {}", pdf_text_string(&self.info.author));
+            meta = meta.authors(vec![self.info.author.clone()]);
         }
-        info.push_str(" >>");
-        objects.push((3, info.into_bytes()));
-        objects.sort_by_key(|(id, _)| *id);
-
-        let mut out: Vec<u8> = Vec::new();
-        out.extend_from_slice(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n");
-        let mut offsets = vec![0usize; next as usize];
-        for (id, body) in &objects {
-            if let Some(slot) = offsets.get_mut(*id as usize) {
-                *slot = out.len();
-            }
-            out.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
-            out.extend_from_slice(body);
-            out.extend_from_slice(b"\nendobj\n");
+        pdf.set_metadata(meta);
+        let mut fonts = Fonts::default();
+        for page in &self.pages {
+            let size = Size::from_wh(page.width, page.height).ok_or_else(|| PdfError("page size".into()))?;
+            let mut p = pdf.start_page_with(PageSettings::new(size));
+            let mut s = p.surface();
+            draw_page(&mut s, &mut fonts, &page.ops);
+            s.finish();
+            p.finish();
         }
-        let xref = out.len();
-        let mut x = format!("xref\n0 {}\n0000000000 65535 f \n", next);
-        for off in offsets.iter().skip(1) {
-            let _ = writeln!(x, "{off:010} 00000 n ");
-        }
-        let _ = write!(x, "trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{}\n%%EOF\n", next, xref);
-        out.extend_from_slice(x.as_bytes());
-        out
+        pdf.finish().map_err(|e| PdfError(format!("{e:?}")))
     }
 }
+
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 #[cfg(test)]
 mod tests;

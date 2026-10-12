@@ -681,7 +681,7 @@ struct PdfMeasure;
 
 impl gridcraft_chart::Measure for PdfMeasure {
     fn text_width(&self, text: &str, size: f32, bold: bool) -> f32 {
-        gridcraft_pdf::text_width(if bold { Font::HelveticaBold } else { Font::Helvetica }, size, text)
+        gridcraft_pdf::text_width(&Font::new(DEFAULT_FONT, bold, false), size, text)
     }
 }
 
@@ -741,9 +741,9 @@ fn draw_prims(pg: &mut Page, prims: &[gridcraft_chart::Prim], xf: Xf) {
                 pg.circle(px, py, r * k, fill.map(blend), stroke.map(|(c, w)| (blend(c), (w * k).max(0.1))));
             }
             Prim::Text { x, y, text, size, color, bold, align, valign, rotation } => {
-                let font = if *bold { Font::HelveticaBold } else { Font::Helvetica };
+                let font = Font::new(DEFAULT_FONT, *bold, false);
                 let size = size * k;
-                let w = gridcraft_pdf::text_width(font, size, text);
+                let w = gridcraft_pdf::text_width(&font, size, text);
                 let dx = match align {
                     H::Left => 0.0,
                     H::Center => -w / 2.0,
@@ -756,7 +756,7 @@ fn draw_prims(pg: &mut Page, prims: &[gridcraft_chart::Prim], xf: Xf) {
                 };
                 let (sn, cs) = if rotation.is_finite() { rotation.sin_cos() } else { (0.0, 1.0) };
                 let (ax, ay) = xf.p(*x, *y);
-                pg.text_rotated(ax + dx * cs - dy * sn, ay + dx * sn + dy * cs, size, font, blend(*color), text, *rotation);
+                pg.text_rotated(ax + dx * cs - dy * sn, ay + dx * sn + dy * cs, size, &font, blend(*color), text, *rotation);
             }
         }
     }
@@ -765,7 +765,7 @@ fn draw_prims(pg: &mut Page, prims: &[gridcraft_chart::Prim], xf: Xf) {
 const PAD_PX: f32 = 2.0;
 
 /// Word-wraps `text` to `width` points.
-fn wrap_lines(text: &str, font: Font, size: f32, width: f32) -> Vec<String> {
+fn wrap_lines(text: &str, font: &Font, size: f32, width: f32) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.split('\n') {
         let mut line = String::new();
@@ -871,7 +871,7 @@ fn draw_border(pg: &mut Page, b: &BorderLine, wb: &Workbook, x0: f32, y0: f32, x
 }
 
 fn font_for(style: &Style) -> Font {
-    Font::styled(Font::family_for(&style.font.name), style.font.bold, style.font.italic)
+    Font::new(&style.font.name, style.font.bold, style.font.italic)
 }
 
 /// Draws the cells of a block: fills, gridlines, data bars, borders and text.
@@ -1057,7 +1057,7 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
     } else if code == "General"
         && let Value::Number(n) = v
     {
-        let digit = gridcraft_pdf::text_width(font, size, "0").max(0.1);
+        let digit = gridcraft_pdf::text_width(&font, size, "0").max(0.1);
         let max_chars = (avail / digit).floor().max(1.0) as usize;
         gridcraft_numfmt::format_general_fit(n, max_chars.min(11)).unwrap_or_else(|| "#".repeat(max_chars.min(255)))
     } else {
@@ -1069,15 +1069,15 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
     if text.is_empty() {
         return;
     }
-    let mut tw = gridcraft_pdf::text_width(font, size, &text);
+    let mut tw = gridcraft_pdf::text_width(&font, size, &text);
     if st.align.shrink && !wrap && tw > avail && tw > 0.0 {
         size = (size * avail / tw).max(1.0);
-        tw = gridcraft_pdf::text_width(font, size, &text);
+        tw = gridcraft_pdf::text_width(&font, size, &text);
     }
     if is_num && !wrap && tw > avail + 0.01 && !sh.show_formulas {
-        let hash = gridcraft_pdf::text_width(font, size, "#").max(0.1);
+        let hash = gridcraft_pdf::text_width(&font, size, "#").max(0.1);
         text = "#".repeat(((avail / hash).floor().max(1.0) as usize).min(255));
-        tw = gridcraft_pdf::text_width(font, size, &text);
+        tw = gridcraft_pdf::text_width(&font, size, &text);
     }
     let h_align = match st.align.h {
         HAlign::General => {
@@ -1097,8 +1097,8 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
     let rotated = rot != 0 && rot != 255;
     // Rotated text wraps along its own direction: upright (±90°) text to the row height.
     let lines: Vec<String> = match (wrap, rotated) {
-        (true, false) => wrap_lines(&text, font, size, avail.max(size)),
-        (true, true) if rot.abs() == 90 => wrap_lines(&text, font, size, (h - 2.0 * pad).max(size)),
+        (true, false) => wrap_lines(&text, &font, size, avail.max(size)),
+        (true, true) if rot.abs() == 90 => wrap_lines(&text, &font, size, (h - 2.0 * pad).max(size)),
         (true, true) => vec![text.lines().next().unwrap_or_default().to_string()],
         (false, _) => vec![text],
     };
@@ -1158,7 +1158,7 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
             } else {
                 (x + pad + (last - i) * line_h, y + pad + size * 0.8)
             };
-            pg.text_rotated(ox, oy, size, font, color, t, angle);
+            pg.text_rotated(ox, oy, size, &font, color, t, angle);
         }
         pg.restore();
         return;
@@ -1169,8 +1169,8 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
         let mut yy = y + pad + size * 0.8;
         for ch in chars {
             let s = ch.to_string();
-            let cw = gridcraft_pdf::text_width(font, size, &s);
-            pg.text(x + (w - cw) / 2.0, yy, size, font, color, &s);
+            let cw = gridcraft_pdf::text_width(&font, size, &s);
+            pg.text(x + (w - cw) / 2.0, yy, size, &font, color, &s);
             yy += line_h;
             if yy > y + h + line_h {
                 break;
@@ -1180,7 +1180,7 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
         return;
     }
     for (i, line) in lines.iter().enumerate() {
-        let lw = gridcraft_pdf::text_width(font, size, line);
+        let lw = gridcraft_pdf::text_width(&font, size, line);
         let lx = match h_align {
             HAlign::Right => x + w - pad - lw - indent,
             HAlign::Center => x + (w - lw) / 2.0,
@@ -1190,7 +1190,7 @@ fn draw_text(pg: &mut Page, b: &Block, c: CellRef, l: &Look, rect: (f32, f32, f3
         if ly - size > y + h || ly < y - line_h {
             continue;
         }
-        pg.text(lx, ly, size, font, color, line);
+        pg.text(lx, ly, size, &font, color, line);
         if st.font.underline != Underline::None {
             let uw = (size * 0.06).max(0.2);
             pg.stroke_line(lx, ly + size * 0.12, lx + lw, ly + size * 0.12, uw, color);
@@ -1298,11 +1298,11 @@ fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Block) 
             let fm = &shp.format;
             let text_box = shp.kind == ShapeKind::TextBox;
             let size = fm.font_size.unwrap_or(11.0).clamp(1.0, 4000.0) * b.scale;
-            let font = Font::styled(Font::family_for(fm.font.as_deref().unwrap_or("")), fm.bold, fm.italic);
+            let font = Font::new(fm.font.as_deref().filter(|f| !f.is_empty()).unwrap_or(DEFAULT_FONT), fm.bold, fm.italic);
             let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or([0, 0, 0]);
             let align = fm.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
             let anchor = fm.anchor.unwrap_or(if text_box { ShapeTextAnchor::Top } else { ShapeTextAnchor::Middle });
-            let lines = wrap_lines(&shp.text, font, size, (w - 4.0 * b.k).max(size));
+            let lines = wrap_lines(&shp.text, &font, size, (w - 4.0 * b.k).max(size));
             let block_h = lines.len().min(500) as f32 * size * 1.2;
             let mut yy = match anchor {
                 ShapeTextAnchor::Top => y + 2.0 * b.k,
@@ -1310,13 +1310,13 @@ fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Block) 
                 ShapeTextAnchor::Bottom => y + h - 2.0 * b.k - block_h,
             } + size * 0.8;
             for l in lines.iter().take(500) {
-                let lw = gridcraft_pdf::text_width(font, size, l);
+                let lw = gridcraft_pdf::text_width(&font, size, l);
                 let lx = match align {
                     ShapeTextAlign::Left => x + 2.0 * b.k,
                     ShapeTextAlign::Center => x + (w - lw) / 2.0,
                     ShapeTextAlign::Right => x + w - 2.0 * b.k - lw,
                 };
-                pg.text(lx, yy, size, font, color, l);
+                pg.text(lx, yy, size, &font, color, l);
                 yy += size * 1.2;
             }
         }
@@ -1339,6 +1339,7 @@ fn draw_headings(pg: &mut Page, b: &Block, col_heads: bool, row_heads: bool, at:
     let line = [0xA0, 0xA0, 0xA0];
     let fsize = 9.0 * b.scale.max(0.1);
     let lw = (0.35 * b.scale).clamp(0.1, 0.5);
+    let font = Font::new(DEFAULT_FONT, false, false);
     if col_heads {
         let y = at.1;
         for col in b.cols.0..=b.cols.1 {
@@ -1349,8 +1350,8 @@ fn draw_headings(pg: &mut Page, b: &Block, col_heads: bool, row_heads: bool, at:
             pg.fill_rect(x0, y, x1 - x0, size.1, fill);
             pg.rect_stroke(x0, y, x1 - x0, size.1, lw, line);
             let t = gridcraft_core::col_to_letters(col);
-            let tw = gridcraft_pdf::text_width(Font::Helvetica, fsize, &t);
-            pg.text(x0 + (x1 - x0 - tw) / 2.0, y + size.1 / 2.0 + fsize * 0.35, fsize, Font::Helvetica, [0x40, 0x40, 0x40], &t);
+            let tw = gridcraft_pdf::text_width(&font, fsize, &t);
+            pg.text(x0 + (x1 - x0 - tw) / 2.0, y + size.1 / 2.0 + fsize * 0.35, fsize, &font, [0x40, 0x40, 0x40], &t);
         }
     }
     if row_heads {
@@ -1363,8 +1364,8 @@ fn draw_headings(pg: &mut Page, b: &Block, col_heads: bool, row_heads: bool, at:
             pg.fill_rect(x, y0, size.0, y1 - y0, fill);
             pg.rect_stroke(x, y0, size.0, y1 - y0, lw, line);
             let t = (row + 1).to_string();
-            let tw = gridcraft_pdf::text_width(Font::Helvetica, fsize, &t);
-            pg.text(x + (size.0 - tw) / 2.0, y0 + (y1 - y0) / 2.0 + fsize * 0.35, fsize, Font::Helvetica, [0x40, 0x40, 0x40], &t);
+            let tw = gridcraft_pdf::text_width(&font, fsize, &t);
+            pg.text(x + (size.0 - tw) / 2.0, y0 + (y1 - y0) / 2.0 + fsize * 0.35, fsize, &font, [0x40, 0x40, 0x40], &t);
         }
     }
 }
@@ -1383,18 +1384,18 @@ fn draw_header_footer(pg: &mut Page, lay: &SheetLayout, which: gridcraft_model::
                 continue;
             }
             let size = sec.size.unwrap_or(10.0).clamp(1.0, 72.0);
-            let font = Font::styled(gridcraft_pdf::Family::Sans, sec.bold, sec.italic);
+            let font = Font::new(DEFAULT_FONT, sec.bold, sec.italic);
             let lines: Vec<&str> = sec.text.split('\n').take(20).collect();
             let n = lines.len() as f32;
             for (j, line) in lines.iter().enumerate() {
-                let lw = gridcraft_pdf::text_width(font, size, line);
+                let lw = gridcraft_pdf::text_width(&font, size, line);
                 let x = match i {
                     0 => l,
                     1 => (pw - lw) / 2.0,
                     _ => pw - r - lw,
                 };
                 let y = if header { hm + size * 0.8 + j as f32 * size * 1.2 } else { ph - fm - size * 0.22 - (n - 1.0 - j as f32) * size * 1.2 };
-                pg.text(x, y, size, font, [0, 0, 0], line);
+                pg.text(x, y, size, &font, [0, 0, 0], line);
             }
         }
     }
@@ -1437,7 +1438,7 @@ fn seg_size(sh: &Sheet, seg: (u32, u32), rows: bool) -> f32 {
 }
 
 /// Renders laid-out sheets to a PDF.
-pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str) -> (Vec<u8>, usize) {
+pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str) -> Result<(Vec<u8>, usize)> {
     let mut doc = PdfDoc::new();
     doc.info.title = if wb.props.title.is_empty() { file.to_string() } else { wb.props.title.clone() };
     doc.info.author = wb.props.author.clone();
@@ -1497,7 +1498,8 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
         }
     }
     let n = doc.page_count();
-    (doc.finish(), n)
+    let bytes = doc.finish().map_err(|e| EngineError::Other(e.to_string()))?;
+    Ok((bytes, n))
 }
 
 // ---------------------------------------------------------------- commands
@@ -1507,7 +1509,7 @@ fn build_pdf(s: &Session, p: &Json, cmd: &str) -> Result<(Vec<u8>, usize)> {
     let d = s.doc()?;
     let lays = layouts(&d.wb, &opts);
     let path = d.path.clone().unwrap_or_default();
-    Ok(render_pdf(&d.wb, &lays, &d.display_title(), &path))
+    render_pdf(&d.wb, &lays, &d.display_title(), &path)
 }
 
 pub(crate) fn export_pdf(s: &mut Session, p: &Json) -> Result<Json> {
@@ -1740,6 +1742,20 @@ mod tests {
     fn contains(hay: &[u8], needle: &str) -> bool {
         hay.windows(needle.len()).any(|w| w == needle.as_bytes())
     }
+    /// The text a PDF reader extracts from `pdf`, page after page.
+    fn pdf_text(pdf: &[u8]) -> String {
+        gridcraft_pdf::test_support::page_texts(pdf).unwrap().join("\n")
+    }
+
+    #[test]
+    fn unicode_text_round_trips_through_the_pdf() {
+        let mut s = s();
+        let text = "ORR \u{2265} 50% \u{b7} \u{3b1}-synuclein \u{b7} \u{b9}\u{2077}\u{2077}Lu \u{b7} \u{58f2}\u{4e0a}";
+        assert_eq!(text, "ORR ≥ 50% · α-synuclein · ¹⁷⁷Lu · 売上");
+        s.execute("cell.set", json!({"cell": "A1", "input": text})).unwrap();
+        let (pdf, _) = pdf_of(&mut s, json!({}));
+        assert_eq!(pdf_text(&pdf), text);
+    }
 
     #[test]
     fn header_sections_split_join_and_field_names() {
@@ -1807,7 +1823,7 @@ mod tests {
         let (pdf, pages) = pdf_of(&mut s, json!({}));
         assert_eq!(pages, 7);
         assert!(pdf.starts_with(b"%PDF-1.7"));
-        assert!(contains(&pdf, "/Count 7"));
+        assert_eq!(gridcraft_pdf::test_support::page_texts(&pdf).unwrap().len(), 7);
         let pv = s.execute("file.printPreview", json!({})).unwrap();
         assert_eq!(pv["pages"], 7);
         assert_eq!(pv["pageList"][0]["rows"], "1:45");
@@ -1856,8 +1872,9 @@ mod tests {
         assert_eq!(r["firstHeader"], "&CCover");
         let (pdf, pages) = pdf_of(&mut s, json!({}));
         assert_eq!(pages, 3);
-        assert!(contains(&pdf, "(Cover) Tj") && contains(&pdf, "(Even 2) Tj") && contains(&pdf, "(Odd 3) Tj"));
-        assert!(!contains(&pdf, "(Odd 1) Tj"), "the first page has its own header");
+        let text = pdf_text(&pdf);
+        assert!(text.contains("Cover") && text.contains("Even 2") && text.contains("Odd 3"));
+        assert!(!text.contains("Odd 1"), "the first page has its own header");
         // One section of the even-page footer, edited in place.
         s.execute("pageLayout.headerFooter", json!({"page": "even", "part": "footer", "section": "right", "text": "&[Tab]"})).unwrap();
         assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().print.even_footer, "&R&A");
@@ -1865,7 +1882,8 @@ mod tests {
         // Turned off, every page prints the odd header again.
         s.execute("pageLayout.headerFooter", json!({"differentFirst": false, "differentOddEven": false})).unwrap();
         let (pdf, _) = pdf_of(&mut s, json!({}));
-        assert!(contains(&pdf, "(Odd 1) Tj") && contains(&pdf, "(Odd 2) Tj") && !contains(&pdf, "(Cover) Tj"));
+        let text = pdf_text(&pdf);
+        assert!(text.contains("Odd 1") && text.contains("Odd 2") && !text.contains("Cover"));
     }
 
     #[test]
@@ -1880,12 +1898,11 @@ mod tests {
         .unwrap();
         let (pdf, pages) = pdf_of(&mut s, json!({}));
         assert_eq!(pages, 1);
-        assert!(contains(&pdf, "(Quarterly Report) Tj"));
-        assert!(contains(&pdf, "(1234.5) Tj"));
-        assert!(contains(&pdf, "(Left Sheet1) Tj"));
-        assert!(contains(&pdf, "(Page 1 of 1) Tj"));
-        assert!(contains(&pdf, "(Book1) Tj"));
-        assert!(contains(&pdf, "/Helvetica-Bold"));
+        let text = pdf_text(&pdf);
+        for want in ["Quarterly Report", "1234.5", "Left Sheet1", "Page 1 of 1", "Book1"] {
+            assert!(text.contains(want), "{want} in {text:?}");
+        }
+        assert!(contains(&pdf, "-Bold"), "the bold face is embedded for the bold cell");
         let cx = HfContext {
             page: 3,
             pages: 9,
@@ -1917,7 +1934,7 @@ mod tests {
         assert_eq!(r["pages"], 1);
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF-"));
-        assert!(contains(&bytes, "(hello) Tj"));
+        assert!(pdf_text(&bytes).contains("hello"));
         let _ = std::fs::remove_dir_all(&dir);
         let r = s.execute("file.print", json!({})).unwrap();
         assert!(r["base64"].as_str().unwrap().len() > 100);
@@ -1934,7 +1951,7 @@ mod tests {
         assert_eq!(r["pages"], 1);
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.starts_with(b"%PDF-"));
-        assert!(contains(&bytes, "(hello) Tj"));
+        assert!(pdf_text(&bytes).contains("hello"));
         // The PDF is a print, not the workbook's file: Save still asks where to put the workbook.
         let d = s.doc().unwrap();
         assert!(d.path.is_none() && d.is_dirty());
@@ -1954,8 +1971,9 @@ mod tests {
         s.execute("home.borders", json!({"range": "J5:K6", "preset": "outside", "style": "thick"})).unwrap_or_default();
         let (pdf, pages) = pdf_of(&mut s, json!({"sheets": "all"}));
         assert!(pages >= 1);
-        assert!(contains(&pdf, "(Merged) Tj"));
-        assert!(contains(&pdf, "(A long piece of text that overflows into neighbours) Tj"));
+        let text = pdf_text(&pdf);
+        assert!(text.contains("Merged"));
+        assert!(text.contains("A long piece of text that overflows into neighbours"));
     }
 
     #[test]
@@ -1980,10 +1998,10 @@ mod tests {
         });
         let charts = s.doc().unwrap().wb.active().unwrap().charts.len();
         let (pdf, _) = pdf_of(&mut s, json!({}));
-        assert!(contains(&pdf, "/Subtype /Image"));
-        assert!(contains(&pdf, "/SMask"));
+        assert_eq!(gridcraft_pdf::test_support::pages(&pdf).unwrap().iter().map(|p| p.images).sum::<usize>(), 1);
         if charts > 0 {
-            assert!(contains(&pdf, "(Apples) Tj") || contains(&pdf, "(Qty) Tj"));
+            let text = pdf_text(&pdf);
+            assert!(text.contains("Apples") || text.contains("Qty"));
         }
     }
 
@@ -2056,10 +2074,11 @@ mod tests {
         let b = bands(0, 2, |r| if r == 1 { 100.0 } else { 10.0 }, |_| 35.0, &[], 100);
         assert_eq!(b, vec![(0, 0), (1, 1), (2, 2)]);
         assert_eq!(bands(0, 1_000_000, |_| 10.0, |_| 5.0, &[], 3).len(), 3);
-        let w = wrap_lines("the quick brown fox jumps", Font::Helvetica, 10.0, 50.0);
+        let font = Font::new(DEFAULT_FONT, false, false);
+        let w = wrap_lines("the quick brown fox jumps", &font, 10.0, 50.0);
         assert!(w.len() >= 2);
-        assert!(w.iter().all(|l| gridcraft_pdf::text_width(Font::Helvetica, 10.0, l) <= 50.0 || !l.contains(' ')));
-        let w = wrap_lines("Supercalifragilistic", Font::Helvetica, 10.0, 20.0);
+        assert!(w.iter().all(|l| gridcraft_pdf::text_width(&font, 10.0, l) <= 50.0 || !l.contains(' ')));
+        let w = wrap_lines("Supercalifragilistic", &font, 10.0, 20.0);
         assert!(w.len() > 2);
     }
 
@@ -2075,13 +2094,17 @@ mod tests {
         s.execute("home.columnWidth", json!({"cols": "A:B", "chars": 6})).unwrap();
         s.execute("home.rowHeight", json!({"rows": "1:1", "height": 267})).unwrap();
         let (pdf, _) = pdf_of(&mut s, json!({}));
-        let pdf = String::from_utf8_lossy(&pdf);
-        // The page holds only these two cells, so every text block on it is a piece of a header.
-        let blocks: Vec<&str> = pdf.split("BT\n").skip(1).filter(|b| b.contains(" Tj")).collect();
-        let up = blocks.iter().filter(|b| b.contains("\n0 1 -1 0 ")).count();
-        let down = blocks.iter().filter(|b| b.contains("\n0 -1 1 0 ")).count();
-        // Every piece of both headers is rotated, each wrapped along the row height into a few long lines.
-        assert_eq!(up + down, blocks.len(), "a header line printed flat: {blocks:?}");
-        assert!((1..=3).contains(&up) && (1..=3).contains(&down), "up {up}, down {down}: {blocks:?}");
+        // The page holds only these two cells, so every glyph on it belongs to a header.
+        let glyphs: Vec<_> = gridcraft_pdf::test_support::pages(&pdf).unwrap().into_iter().flat_map(|p| p.glyphs).collect();
+        let lines = |angle: f64| {
+            let mut xs: Vec<i64> = glyphs.iter().filter(|g| (g.angle - angle).abs() < 0.5).map(|g| g.origin.0.round() as i64).collect();
+            xs.sort();
+            xs.dedup();
+            xs.len()
+        };
+        let (up, down) = (lines(90.0), lines(-90.0));
+        // Every glyph of both headers is rotated, each wrapped along the row height into a few long lines.
+        assert!(glyphs.iter().all(|g| (g.angle.abs() - 90.0).abs() < 0.5), "a header line printed flat");
+        assert!((1..=3).contains(&up) && (1..=3).contains(&down), "up {up}, down {down}");
     }
 }

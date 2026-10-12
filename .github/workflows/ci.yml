@@ -27,12 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Linux build dependencies (winit, wgpu, rfd)
+      - name: Install Linux build dependencies (winit, wgpu, rfd) and the fonts PDF export tests draw with
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
+            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
+            fonts-crosextra-carlito fonts-liberation fonts-noto-cjk
 
       - name: Install Rust (stable + clippy, rustfmt, wasm32)
         run: |

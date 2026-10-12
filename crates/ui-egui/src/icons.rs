@@ -171,11 +171,11 @@ impl G<'_> {
     }
     fn text(&self, x: f32, y: f32, t: &str, size: f32, c: Color32, bold: bool, italic: bool) {
         let fam = if bold {
-            crate::theme::CELL_BOLD
+            gridcraft_fonts::CELL_BOLD
         } else if italic {
-            crate::theme::CELL_ITALIC
+            gridcraft_fonts::CELL_ITALIC
         } else {
-            crate::theme::CELL
+            gridcraft_fonts::CELL
         };
         let font = egui::FontId::new(size * self.s, egui::FontFamily::Name(fam.into()));
         self.p.text(self.pt(x, y), egui::Align2::CENTER_CENTER, t, font, c);

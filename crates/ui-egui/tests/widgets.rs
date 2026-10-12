@@ -1,13 +1,13 @@
 //! Ribbon widget paint tests, using egui's bundled fonts on every platform.
 
 use egui::{FontDefinitions, FontFamily, Rect, Shape, pos2, vec2};
-use gridcraft_ui_egui::{icons::Icon, theme, widgets};
+use gridcraft_ui_egui::{icons::Icon, widgets};
 
 fn render_big_button(label: &str, dropdown: bool) -> (Rect, Vec<Shape>) {
     let ctx = egui::Context::default();
     let mut fonts = FontDefinitions::default();
     let proportional = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    fonts.families.insert(FontFamily::Name(theme::UI.into()), proportional);
+    fonts.families.insert(FontFamily::Name(gridcraft_fonts::UI.into()), proportional);
     ctx.set_fonts(fonts);
     let mut rect = Rect::NOTHING;
     let mut output = ctx

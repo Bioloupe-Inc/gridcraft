@@ -1,0 +1,16 @@
+[package]
+name = "gridcraft-fonts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GridCraft's font database: installed and registered faces, Office font substitution and script fallbacks"
+
+[lints]
+workspace = true
+
+[dependencies]
+skrifa = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+epaint_default_fonts = { workspace = true }

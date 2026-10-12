@@ -226,8 +226,8 @@ pub struct SheetApp {
     /// startup `fonts_ready` gate (egui applies new definitions at the next pass).
     fonts_rebind: bool,
     /// Han face order the installed fonts were built with; a language switch rebuilds the fonts
-    /// only when it changes this (see `theme::HanOrder`).
-    fonts_han: Option<theme::HanOrder>,
+    /// only when it changes this (see `gridcraft_fonts::HanOrder`).
+    fonts_han: Option<gridcraft_fonts::HanOrder>,
     effective_dark: bool,
     /// The desktop's light/dark choice, watched while the app runs (Linux has no winit answer).
     desktop_theme: desktop_theme::DesktopTheme,
@@ -287,7 +287,7 @@ impl SheetApp {
     ///
     /// [`logic`]: SheetApp::logic
     pub fn setup_context(ctx: &egui::Context, dark: bool) {
-        fonts::start_scan();
+        gridcraft_fonts::start_scan();
         Self::setup_context_for_language(ctx, dark, i18n::Language::En);
     }
 
@@ -839,7 +839,7 @@ impl SheetApp {
         // A keytip control request lives one frame: the ribbon consumes it during `ui`, and
         // anything that never reached a control (collapsed ribbon, tab switch) is dropped.
         self.ui.keytip_invoke = None;
-        if self.fonts_han.is_some_and(|han| han != theme::HanOrder::of(self.ui.language)) {
+        if self.fonts_han.is_some_and(|han| han != theme::han_order(self.ui.language)) {
             self.fonts_ready = false;
             self.fonts_set = false;
         }
@@ -853,13 +853,13 @@ impl SheetApp {
                 // The rebuilt set has no workbook fonts yet: bind them again once it is active.
                 self.fonts_bound.clear();
                 self.fonts_seen = (0, 0);
-                self.fonts_han = Some(theme::HanOrder::of(self.ui.language));
+                self.fonts_han = Some(theme::han_order(self.ui.language));
                 ctx.request_repaint();
             }
         } else if self.fonts_rebind {
             // A font-set change made last frame is active now.
             self.fonts_rebind = false;
-        } else if fonts::scan_done() {
+        } else if gridcraft_fonts::scan_done() {
             // Bind the workbook's installed fonts once the background scan has finished. Adding
             // fonts re-applies the font set, which egui activates at the next pass, so skip this
             // frame's paint (same one-frame cost as startup). Only when the workbook changed.
