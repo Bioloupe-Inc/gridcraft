@@ -253,11 +253,9 @@ fn globals(stream: &[u8], budget: &mut Budget) -> Result<Globals, IoError> {
                 budget.text(code.len())?;
                 g.formats.insert(ifmt, code);
             }
-            0x00E0 => {
-                if g.xf_formats.len() < MAX_XFS {
-                    c.u16()?;
-                    g.xf_formats.push(c.u16()?);
-                }
+            0x00E0 if g.xf_formats.len() < MAX_XFS => {
+                c.u16()?;
+                g.xf_formats.push(c.u16()?);
             }
             0x00FC => g.sst = shared_strings(&mut c, budget)?,
             0x01AE => {
