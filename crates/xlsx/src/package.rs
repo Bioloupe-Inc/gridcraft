@@ -87,8 +87,16 @@ impl<'a> Package<'a> {
     }
 
     pub fn read_xml(&mut self, part: &str) -> Result<Option<El>, IoError> {
+        Ok(self.read_xml_bytes(part)?.map(|(_, e)| e))
+    }
+
+    /// [`Self::read_xml`] that also returns the part's bytes.
+    pub fn read_xml_bytes(&mut self, part: &str) -> Result<Option<(Vec<u8>, El)>, IoError> {
         match self.read(part)? {
-            Some(b) => xml::parse(&b).map(Some).map_err(|e| prefix(part, e)),
+            Some(b) => {
+                let e = xml::parse(&b).map_err(|e| prefix(part, e))?;
+                Ok(Some((b, e)))
+            }
             None => Ok(None),
         }
     }

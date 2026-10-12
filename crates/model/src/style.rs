@@ -369,14 +369,17 @@ pub struct StyleTable {
 
 impl Default for StyleTable {
     fn default() -> Self {
-        let d = Style::default();
-        let mut index = HashMap::new();
-        index.insert(d.clone(), StyleId::DEFAULT);
-        StyleTable { styles: vec![d], index }
+        StyleTable::with_default(Style::default())
     }
 }
 
 impl StyleTable {
+    /// A table whose default (Normal) style is `normal`, as a file defines it.
+    pub fn with_default(normal: Style) -> StyleTable {
+        let mut index = HashMap::new();
+        index.insert(normal.clone(), StyleId::DEFAULT);
+        StyleTable { styles: vec![normal], index }
+    }
     pub fn get(&self, id: StyleId) -> &Style {
         self.styles.get(id.0 as usize).or_else(|| self.styles.first()).unwrap_or(&DEFAULT_STYLE)
     }

@@ -45,7 +45,11 @@ impl Ctx<'_> {
     }
     /// Reads and parses an optional part: problems other than size limits become warnings.
     pub fn optional_xml(&mut self, part: &str) -> Result<Option<El>, IoError> {
-        match self.pkg.read_xml(part) {
+        Ok(self.optional_xml_bytes(part)?.map(|(_, e)| e))
+    }
+    /// [`Self::optional_xml`] that also returns the part's bytes.
+    pub fn optional_xml_bytes(&mut self, part: &str) -> Result<Option<(Vec<u8>, El)>, IoError> {
+        match self.pkg.read_xml_bytes(part) {
             Ok(Some(e)) => Ok(Some(e)),
             Ok(None) => {
                 self.warn(format!("missing part {part}"));
@@ -116,14 +120,21 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
     {
         checkboxes = crate::feature_bags::checkbox_complements(&x);
     }
+    let mut styles_part = None;
     if let Some(r) = find_rel(&wb_rels, "styles").cloned() {
-        if let Some(x) = cx.optional_xml(&r.target)? {
+        if let Some((bytes, x)) = cx.optional_xml_bytes(&r.target)? {
             let StylesIn { xfs, dxfs, palette, named, num_fmts } = read_styles(&x, &checkboxes);
             cx.num_fmts = num_fmts;
-            cx.xf_map = xfs.into_iter().enumerate().map(|(i, s)| if i == 0 { StyleId::DEFAULT } else { cx.styles.intern(s) }).collect();
+            // The first cell format is the workbook's default (Normal) style.
+            let mut xfs = xfs.into_iter();
+            if let Some(normal) = xfs.next() {
+                cx.styles = StyleTable::with_default(normal);
+                cx.xf_map = std::iter::once(StyleId::DEFAULT).chain(xfs.map(|s| cx.styles.intern(s))).collect();
+            }
             cx.dxfs = dxfs;
             cx.palette = palette;
             wb.cell_styles = named;
+            styles_part = Some(Arc::from(bytes));
         }
     } else {
         cx.warn("no styles part");
@@ -328,6 +339,9 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
         }
     }
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml);
+    if let Some(styles) = styles_part {
+        Arc::make_mut(wb.preserved.get_or_insert_default()).styles = Some(styles);
+    }
     // Calls of LAMBDA names are spelled like the names (the parser upper-cases them).
     wb.apply_name_call_case();
     wb.styles = cx.styles;
